@@ -114,8 +114,9 @@ async fn start(app: &tauri::AppHandle, client: &reqwest::Client) -> Result<Strin
     if answering(client).await {
         return Ok("already running".into());
     }
-    // set to start at login: the login agent owns the service, so ask it to start it
-    if eightgent::service::installed() && eightgent::service::kickstart() {
+    // set to start at login: the login agent owns the service, so ask it to start it (unless this
+    // window was pointed at another data folder, whose service the login agent does not run)
+    if std::env::var_os("EIGHTGENT_HOME").is_none() && eightgent::service::installed() && eightgent::service::kickstart() {
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(250)).await;
             if answering(client).await {
