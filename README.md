@@ -10,8 +10,26 @@ What is built and what is planned is in [docs/DESIGN.md](docs/DESIGN.md).
 
 **Status: early.** The service runs and is tested with real models on llama.cpp, TensorFold, uzu
 and Ollama on an Apple Silicon Mac. It updates engines installed with Homebrew and installs uzu's
-ready-made engines; TensorFold's 0.6 line and building uzu from source still come from the Home apps. The app builds and runs on that Mac; there is no release yet, and nothing has
-been built on Windows or Linux.
+ready-made engines; TensorFold's 0.6 line and building uzu from source still come from the Home apps.
+The app is in daily use on that Mac. Windows and Linux builds exist and pass the service's tests on
+GitHub's machines; nobody has used them yet, and the loaders for those systems (llama.cpp, Ollama,
+LM Studio, Strata) are untested there.
+
+## Download
+
+**[The newest release](https://github.com/majieddd/8gent/releases/latest)** has the app for macOS
+(Apple Silicon), Windows and Linux, and the service program on its own for each. There is also a
+page at https://downloads.kr8.app/8gent/.
+
+- **macOS:** open the `.dmg` and drag 8gent to Applications. The app is not signed with an Apple
+  Developer ID yet, so the first time, open it with a right-click > **Open** (or allow it under
+  System Settings > Privacy & Security). Built and tested on an M5 with macOS 26.
+- **Windows and Linux:** built and tested by GitHub's machines (the service's tests pass there), not
+  yet tried by a person. The Windows installer is not code-signed, so SmartScreen asks: **More
+  info**, then **Run anyway**.
+
+The app looks for a newer version itself (Settings > Updates). On macOS it installs it: the download
+is checked against the SHA-256 GitHub publishes, the version you have is kept as a recovery copy.
 
 ## What it does today
 

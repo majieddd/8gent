@@ -333,6 +333,22 @@ themes, loading, switching from llama.cpp to TensorFold, a switch to a model who
 and a chat with and without thinking. Its logic has tests (`npm test`); its screens do not yet. The
 app has not been built or run on Windows or Linux.
 
+## Releases
+
+A tag `vX.Y.Z` runs the Build workflow: on GitHub's macOS (Apple Silicon), Windows and Linux
+machines it builds the service program and the app, and attaches them to a draft release
+(`8gent-X.Y.Z-macos-arm64.dmg` and `.app.zip`, `-windows-x64-setup.exe`, `-linux-x64.AppImage` and
+`.deb`, and `8gent-service-...` for the program alone). A person writes the notes and publishes it.
+Nothing is signed with a platform certificate yet.
+
+The app asks GitHub for the newest release (Settings > Updates). On macOS it installs it: the
+`.app.zip` must match the SHA-256 GitHub publishes for it, be 8gent, and be the version the release
+names; then the app quits and a helper keeps a copy of the version that was there, puts the new one
+in, restarts the service (the login item runs the program inside the app) and opens the app again.
+On Windows and Linux it names the release page.
+
+The downloads also have a page on kr8's site, https://downloads.kr8.app/8gent/.
+
 ## kr8
 
 kr8 already reaches local models through one provider, `kr8-local`, which speaks to any
@@ -379,9 +395,12 @@ In the order agreed:
    from source and TensorFold's 0.6 line are still to move in.
 4. ~~One memory budget, peak-memory measurement, and a second slot for a small always-on model.~~
    Done in a first form (see Memory).
-5. Releases with in-app updates (GitHub and a page on the kr8 site); the Home apps' repositories
-   then point here.
-6. Windows and Linux builds, with a job object on Windows so an engine never outlives the service.
+5. ~~Releases with in-app updates (GitHub and a page on the kr8 site); the Home apps' repositories
+   then point here.~~ Done: a version tag builds every system's files into a draft release; the
+   app checks for and (on macOS) installs its own updates.
+6. Windows and Linux: ~~builds~~ done by GitHub; still to do: a person trying them, a job object on
+   Windows so an engine never outlives the service, starting at login there, and updates that
+   install themselves.
 7. kr8: detection and the real context window, on a branch of kr8 with a draft pull request.
 8. The harness layer, and with it Chat's agent abilities.
 
