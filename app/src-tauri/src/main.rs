@@ -174,14 +174,92 @@ fn app_file(version: &str) -> String {
     format!("8gent-{version}-{}.app.zip", eightgent::manifest::platform())
 }
 
+fn check_update(current: &str) -> Result<AppUpdate, String> {
+    let (latest, page, files) = eightgent::updates::latest_release(REPO)?;
+    let available = eightgent::manifest::compare_versions(&latest, current) == std::cmp::Ordering::Greater;
+    let can_install = cfg!(target_os = "macos") && files.iter().any(|f| f.name == app_file(&latest) && f.sha256.is_some());
+    Ok(AppUpdate { current: current.to_string(), latest, available, can_install, page })
+}
+
 /// Is there a newer 8gent than this one?
 #[tauri::command]
 async fn app_update_check(app: tauri::AppHandle) -> Result<AppUpdate, String> {
     let current = app.package_info().version.to_string();
-    let (latest, page, files) = tauri::async_runtime::spawn_blocking(|| eightgent::updates::latest_release(REPO)).await.map_err(|e| e.to_string())??;
-    let available = eightgent::manifest::compare_versions(&latest, &current) == std::cmp::Ordering::Greater;
-    let can_install = cfg!(target_os = "macos") && files.iter().any(|f| f.name == app_file(&latest) && f.sha256.is_some());
-    Ok(AppUpdate { current, latest, available, can_install, page })
+    tauri::async_runtime::spawn_blocking(move || check_update(&current)).await.map_err(|e| e.to_string())?
+}
+
+/// The app bundle this program runs from.
+#[cfg(target_os = "macos")]
+fn this_bundle() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    exe.ancestors().find(|p| p.extension().is_some_and(|x| x == "app")).map(|p| p.to_path_buf()).ok_or_else(|| "This copy of 8gent is not inside an app bundle, so it cannot replace itself.".to_string())
+}
+
+/// Download the newest 8gent and make sure of it: the SHA-256 GitHub publishes, that it is 8gent,
+/// and that it is the version the release names. Returns that version and where the new app waits.
+#[cfg(target_os = "macos")]
+fn stage_update(current: &str, paths: &Paths) -> Result<(String, PathBuf), String> {
+    use eightgent::updates;
+    let stage = paths.home.join("updates").join("staged");
+    let (latest, _, files) = updates::latest_release(REPO)?;
+    if eightgent::manifest::compare_versions(&latest, current) != std::cmp::Ordering::Greater {
+        return Err(format!("8gent {current} is the newest version."));
+    }
+    let file = files.iter().find(|f| f.name == app_file(&latest)).ok_or_else(|| format!("Release {latest} has no build for this kind of Mac."))?;
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    let zip = stage.join(&file.name);
+    updates::download_verified(file, &zip)?;
+    updates::run(std::path::Path::new("/usr/bin/ditto"), &["-x", "-k", &zip.to_string_lossy(), &stage.to_string_lossy()], Duration::from_secs(300))?;
+    let fresh = stage.join("8gent.app");
+    let plist = fresh.join("Contents/Info.plist");
+    let read = |key: &str| updates::run(std::path::Path::new("/usr/bin/plutil"), &["-extract", key, "raw", &plist.to_string_lossy()], Duration::from_secs(10)).map(|s| s.trim().to_string());
+    if read("CFBundleIdentifier")? != "app.kr8.eightgent" {
+        return Err("The download is not 8gent. Nothing was installed.".into());
+    }
+    let got = read("CFBundleShortVersionString")?;
+    if got != latest {
+        return Err(format!("The download says it is {got}; the release says {latest}. Nothing was installed."));
+    }
+    Ok((latest, fresh))
+}
+
+/// Start the helper that, once this program has ended, keeps a copy of the app that is here, puts
+/// the staged one in its place (the old one back if that fails), restarts the service on the new
+/// program and opens the app again.
+#[cfg(target_os = "macos")]
+fn swap_when_this_ends(bundle: &std::path::Path, staged: &std::path::Path, backup: &std::path::Path, reopen: bool) -> Result<(), String> {
+    let q = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+    // the login item runs the default data folder's service; a window pointed elsewhere leaves it alone
+    let own_service = std::env::var_os("EIGHTGENT_HOME").is_none();
+    let script = format!(
+        r#"while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
+/usr/bin/curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{{}}' http://127.0.0.1:{port}/8gent/v1/shutdown >/dev/null 2>&1
+sleep 2
+rm -rf {backup}; mkdir -p {backup}
+/usr/bin/ditto {bundle} {backup}/8gent.app || exit 1
+rm -rf {bundle} && /usr/bin/ditto {staged} {bundle} || {{ /usr/bin/ditto {backup}/8gent.app {bundle}; }}
+/usr/bin/xattr -dr com.apple.quarantine {bundle} 2>/dev/null
+rm -rf {stage}
+{kick}
+{open}
+"#,
+        pid = std::process::id(),
+        port = port(),
+        backup = q(backup),
+        bundle = q(bundle),
+        staged = q(staged),
+        stage = q(staged.parent().unwrap_or(staged)),
+        kick = if own_service { format!("[ -f \"$HOME/Library/LaunchAgents/{label}.plist\" ] && /bin/launchctl kickstart \"gui/$(id -u)/{label}\" >/dev/null 2>&1", label = eightgent::service::LABEL) } else { "true".to_string() },
+        open = if reopen { format!("/usr/bin/open {}", q(bundle)) } else { "true".to_string() },
+    );
+    let mut helper = std::process::Command::new("/bin/bash");
+    helper.args(["-c", &script]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    {
+        use std::os::unix::process::CommandExt;
+        helper.process_group(0);
+    }
+    helper.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Download the newest 8gent, check it, and put it in place of this one: this app quits, a helper
@@ -196,68 +274,12 @@ async fn app_update_install(app: tauri::AppHandle) -> Result<String, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        use eightgent::updates;
-        let current_version = app.package_info().version.to_string();
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|x| x == "app")).ok_or("This copy of 8gent is not inside an app bundle, so it cannot replace itself.")?.to_path_buf();
+        let current = app.package_info().version.to_string();
+        let bundle = this_bundle()?;
         let paths = Paths::from_env();
-        let stage = paths.home.join("updates").join("staged");
-        let (version, staged) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, PathBuf), String> {
-            let (latest, _, files) = updates::latest_release(REPO)?;
-            if eightgent::manifest::compare_versions(&latest, &current_version) != std::cmp::Ordering::Greater {
-                return Err(format!("8gent {current_version} is the newest version."));
-            }
-            let file = files.iter().find(|f| f.name == app_file(&latest)).ok_or_else(|| format!("Release {latest} has no build for this kind of Mac."))?;
-            let _ = std::fs::remove_dir_all(&stage);
-            std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-            let zip = stage.join(&file.name);
-            updates::download_verified(file, &zip)?;
-            updates::run(std::path::Path::new("/usr/bin/ditto"), &["-x", "-k", &zip.to_string_lossy(), &stage.to_string_lossy()], Duration::from_secs(300))?;
-            let fresh = stage.join("8gent.app");
-            // it must be 8gent, and the version the release says it is
-            let plist = fresh.join("Contents/Info.plist");
-            let read = |key: &str| updates::run(std::path::Path::new("/usr/bin/plutil"), &["-extract", key, "raw", &plist.to_string_lossy()], Duration::from_secs(10)).map(|s| s.trim().to_string());
-            if read("CFBundleIdentifier")? != "app.kr8.eightgent" {
-                return Err("The download is not 8gent. Nothing was installed.".into());
-            }
-            let got = read("CFBundleShortVersionString")?;
-            if got != latest {
-                return Err(format!("The download says it is {got}; the release says {latest}. Nothing was installed."));
-            }
-            Ok((latest, fresh))
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-
-        let backup = paths.home.join("updates").join(format!("app-before-{}", app.package_info().version));
-        let q = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
-        let script = format!(
-            r#"while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
-/usr/bin/curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{{}}' http://127.0.0.1:{port}/8gent/v1/shutdown >/dev/null 2>&1
-sleep 2
-rm -rf {backup}; mkdir -p {backup}
-/usr/bin/ditto {bundle} {backup}/8gent.app || exit 1
-rm -rf {bundle} && /usr/bin/ditto {staged} {bundle} || {{ /usr/bin/ditto {backup}/8gent.app {bundle}; }}
-/usr/bin/xattr -dr com.apple.quarantine {bundle} 2>/dev/null
-rm -rf {stage}
-[ -f "$HOME/Library/LaunchAgents/{label}.plist" ] && /bin/launchctl kickstart "gui/$(id -u)/{label}" >/dev/null 2>&1
-/usr/bin/open {bundle}
-"#,
-            pid = std::process::id(),
-            port = port(),
-            backup = q(&backup),
-            bundle = q(&bundle),
-            staged = q(&staged),
-            stage = q(staged.parent().unwrap()),
-            label = eightgent::service::LABEL,
-        );
-        let mut helper = std::process::Command::new("/bin/bash");
-        helper.args(["-c", &script]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        {
-            use std::os::unix::process::CommandExt;
-            helper.process_group(0);
-        }
-        helper.spawn().map_err(|e| e.to_string())?;
+        let backup = paths.home.join("updates").join(format!("app-before-{current}"));
+        let (version, staged) = tauri::async_runtime::spawn_blocking(move || stage_update(&current, &paths)).await.map_err(|e| e.to_string())??;
+        swap_when_this_ends(&bundle, &staged, &backup, true)?;
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(600)).await;
@@ -267,7 +289,59 @@ rm -rf {stage}
     }
 }
 
+/// The updater without the window, for checking it: `--update-check` says what a check finds,
+/// `--update-install` downloads, checks and swaps (without opening the app afterwards).
+/// `--as-version X` runs either as if this were version X.
+fn headless(args: &[String]) -> Option<i32> {
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if !has("--update-check") && !has("--update-install") {
+        return None;
+    }
+    let current = args.iter().position(|a| a == "--as-version").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    if has("--update-check") {
+        return Some(match check_update(&current) {
+            Ok(u) => {
+                println!("this is {}, the newest release is {}: {}{}", u.current, u.latest, if u.available { "update available" } else { "up to date" }, if u.available && !u.can_install { " (install it from the release page)" } else { "" });
+                0
+            }
+            Err(e) => {
+                eprintln!("8gent: {e}");
+                1
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let paths = Paths::from_env();
+        let run = || -> Result<String, String> {
+            let bundle = this_bundle()?;
+            let (version, staged) = stage_update(&current, &paths)?;
+            swap_when_this_ends(&bundle, &staged, &paths.home.join("updates").join(format!("app-before-{current}")), false)?;
+            Ok(version)
+        };
+        Some(match run() {
+            Ok(v) => {
+                println!("{v} is downloaded and checked; it is put in place as this program ends");
+                0
+            }
+            Err(e) => {
+                eprintln!("8gent: {e}");
+                1
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("8gent: on this system, install the new version from the release page");
+        Some(1)
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = headless(&args) {
+        std::process::exit(code);
+    }
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build().expect("http client");
     tauri::Builder::default()
         .manage(client.clone())
