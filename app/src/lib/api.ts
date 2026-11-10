@@ -57,8 +57,10 @@ export interface Status {
   memory_mode: "always" | "idle" | "on_demand"; idle_minutes: number; auto_switch: boolean; auto_update: boolean; uptime_s: number; idle_s: number;
   selection: Selection;
   engine: { state: "stopped" | "loading" | "ready" | "error"; running: Running | null; memory_bytes: number | null; loading: { loader: string; model: string; seconds: number } | null; error: string | null };
-  memory: { total_bytes: number | null; gpu_budget_bytes: number | null };
+  memory: { total_bytes: number | null; gpu_budget_bytes: number | null; available_bytes: number | null; holders: { name: string; detail: string; bytes: number | null }[] };
   also_loaded: { app: string; detail: string }[];
+  /** The small model kept loaded next to the selected one, answering under `name`. */
+  small: { selection: Selection; name: string; state: "stopped" | "loading" | "ready" | "error"; running: Running | null; memory_bytes: number | null; error: string | null };
   /** Places models are read from that have not answered yet. */
   scanning: string[];
   stats: {
@@ -73,6 +75,8 @@ export interface ModelLoader {
   format: string; quant: string | null; variant: string | null; size_bytes: number | null; context: number | null; max_context: number | null;
   base_bytes: number | null; kv_bytes_per_token: number | null; sessions: number; estimated_memory_bytes: number | null;
   capabilities: Capabilities; speed: Speed | null;
+  /** The most memory this pair was seen to hold, and at which window. */
+  measured: { context: number; sessions: number; bytes: number } | null;
 }
 export interface Model { id: string; name: string; selected: boolean; loaders: ModelLoader[] }
 export interface Requirement { os: string; min: string; since: string | null; note: string; applies_to_installed: boolean; met: boolean }
@@ -185,12 +189,13 @@ export const api = {
   loaders: () => call<{ loaders: Loader[] }>("GET", "/8gent/v1/loaders"),
   requests: (limit = 200) => call<{ requests: RequestRecord[] }>("GET", `/8gent/v1/requests?limit=${limit}`),
   logs: (loader: string, lines = 400) => call<{ loader: string; lines: string[] }>("GET", `/8gent/v1/logs?loader=${encodeURIComponent(loader)}&lines=${lines}`),
-  select: (body: { loader?: string; model?: string; context?: number; thinking?: boolean; load?: boolean }) => call<{ ok: boolean; loaded: boolean }>("POST", "/8gent/v1/select", body),
-  start: () => call<{ ok: boolean }>("POST", "/8gent/v1/engine/start", {}),
+  select: (body: { loader?: string; model?: string; context?: number; thinking?: boolean; load?: boolean; force?: boolean }) => call<{ ok: boolean; loaded: boolean }>("POST", "/8gent/v1/select", body),
+  start: (force = false) => call<{ ok: boolean }>("POST", "/8gent/v1/engine/start", { force }),
   stop: () => call<{ ok: boolean }>("POST", "/8gent/v1/engine/stop", {}),
   rescan: () => call<{ ok: boolean; models: number }>("POST", "/8gent/v1/rescan", {}),
   settings: (body: Partial<Pick<Status, "memory_mode" | "idle_minutes" | "auto_switch" | "auto_update">>) => call<{ ok: boolean }>("POST", "/8gent/v1/settings", body),
   shutdown: () => call<{ ok: boolean }>("POST", "/8gent/v1/shutdown", {}),
+  small: (body: { model: string; loader?: string; context?: number } | { off: true }) => call<{ ok: boolean; loaded: boolean }>("POST", "/8gent/v1/small", body),
   loginItem: (enabled: boolean) => call<{ ok: boolean; restarting?: boolean }>("POST", "/8gent/v1/login-item", { enabled }),
   /** Start the service if it is not running (only the app can; a browser tab cannot start programs). */
   startService: () => (inTauri ? invoke<string>("start_service") : Promise.reject(new Error("Run `8gent serve` in a terminal."))),

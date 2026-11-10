@@ -41,6 +41,10 @@ pub struct Config {
     /// Install newer engines by itself, once a day, when nothing has been asked for a while.
     pub auto_update: bool,
     pub selection: Selection,
+    /// A second, small model that stays loaded next to the selected one and answers under the name
+    /// "<served name>-small": quick acknowledgements and titles while the large model works or is
+    /// not loaded. Unset: there is none.
+    pub small: Selection,
     /// The context window last chosen for each model, used again whenever the model is selected
     /// without naming one.
     pub contexts: BTreeMap<String, u32>,
@@ -60,6 +64,7 @@ impl Default for Config {
             auto_switch: true,
             auto_update: true,
             selection: Selection::default(),
+            small: Selection::default(),
             contexts: BTreeMap::new(),
             loaders: BTreeMap::new(),
         }

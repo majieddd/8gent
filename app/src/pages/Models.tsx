@@ -47,7 +47,7 @@ export function Models({ svc, status, picked, setPicked }: Props) {
   const [query, setQuery] = useState("");
   const [windows, setWindows] = useState<Record<string, number>>({});
   const [pending, setPending] = useState("");
-  const [errors, setErrors] = useState<Record<string, { message: string; detail: string } | null>>({});
+  const [errors, setErrors] = useState<Record<string, { message: string; detail: string; canForce: boolean } | null>>({});
 
   // models 8gent can load itself come first; ones that only another app's server has follow
   const [own, served] = useMemo(() => {
@@ -81,14 +81,14 @@ export function Models({ svc, status, picked, setPicked }: Props) {
   const chosen = windows[model.id] ?? current ?? 65536;
   const running = status.engine.running;
 
-  const serve = async (l: ModelLoader) => {
+  const serve = async (l: ModelLoader, force = false) => {
     const key = `${model.id}/${l.id}`;
     setPending(key);
     setErrors((e) => ({ ...e, [key]: null }));
     try {
-      await api.select({ loader: l.id, model: model.id, context: l.kind === "managed" ? chosen : undefined, load: true });
+      await api.select({ loader: l.id, model: model.id, context: l.kind === "managed" ? chosen : undefined, load: true, force });
     } catch (e) {
-      setErrors((x) => ({ ...x, [key]: e instanceof ApiError ? { message: e.message, detail: e.body?.error?.detail ?? "" } : { message: "The service did not answer.", detail: "" } }));
+      setErrors((x) => ({ ...x, [key]: e instanceof ApiError ? { message: e.message, detail: e.body?.error?.detail ?? "", canForce: e.body?.can_force === true } : { message: "The service did not answer.", detail: "", canForce: false } }));
     }
     await svc.refresh();
     setPending("");
@@ -197,6 +197,7 @@ export function Models({ svc, status, picked, setPicked }: Props) {
                         : mem.fit === "fits" ? `Fits: this computer can hold ${gb(budget)}`
                         : mem.bytes ? undefined : "Shown after its first load"
                       }
+                      measured={l.measured ? `Measured: ${gb(l.measured.bytes)} at ${windowLabel(l.measured.context)}${l.measured.sessions > 1 ? ` with ${l.measured.sessions} conversations` : ""}` : undefined}
                     >
                       {mem.bytes && budget ? <div className="my-0.5"><Meter share={mem.share} tone={mem.fit === "too-big" ? "warn" : "accent"} /></div> : null}
                     </Stat>
@@ -211,7 +212,11 @@ export function Models({ svc, status, picked, setPicked }: Props) {
                 </div>
 
                 {notes.map((n) => <Notice key={n}>{n}</Notice>)}
-                {errors[key] && <Notice tone="bad" detail={errors[key]!.detail}>{errors[key]!.message}</Notice>}
+                {errors[key] && (
+                  <Notice tone="bad" detail={errors[key]!.detail} action={errors[key]!.canForce ? <Button size="sm" onClick={() => serve(l, true)} disabled={pending !== ""}>Load anyway</Button> : undefined}>
+                    {errors[key]!.message}
+                  </Notice>
+                )}
               </Card>
             );
           })}

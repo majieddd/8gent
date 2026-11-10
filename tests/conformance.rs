@@ -65,6 +65,15 @@ ref = "beta-weights"
 max_context = 32768
 
 [[model]]
+id = "huge"
+name = "Huge"
+[[model.build]]
+format = "mock"
+ref = "huge-weights"
+size_bytes = 900000000000
+kv_bytes_per_token = 32768
+
+[[model]]
 id = "gamma"
 name = "Gamma, only as another format"
 [[model.build]]
@@ -258,6 +267,60 @@ async fn switching_on_request_can_be_turned_off() {
     let (code, v) = s.chat("mockb/alpha", "hi").await;
     assert_eq!((code, v["error"]["code"].as_str()), (409, Some("model_not_selected")));
     assert_eq!(reply(&s.chat("8gent", "hi").await.1), "reply from mocka");
+}
+
+#[tokio::test]
+async fn a_small_model_stays_loaded_next_to_the_selected_one() {
+    let s = service().await;
+    // nothing chosen: its name says so
+    let (code, v) = s.chat("8gent-small", "hi").await;
+    assert_eq!(code, 503, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("No small always-on model"));
+    // choose one: it loads at once, on its own engine
+    let (code, v) = s.post("/8gent/v1/small", json!({"model": "beta", "loader": "mockb"})).await;
+    assert_eq!((code, v["loaded"].as_bool()), (200, Some(true)), "{v}");
+    assert_eq!(reply(&s.chat("8gent", "hi").await.1), "reply from mocka");
+    let (code, v) = s.chat("8gent-small", "hi").await;
+    assert_eq!((code, reply(&v), v["model"].as_str()), (200, "reply from mockb", Some("8gent-small")));
+    let st = s.status().await;
+    assert_eq!((st["engine"]["running"]["model"].as_str(), st["small"]["running"]["model"].as_str()), (Some("alpha"), Some("beta")), "both are loaded");
+    assert_eq!(st["small"]["running"]["context"], 8192, "a small window unless one is named");
+    assert_ne!(st["engine"]["running"]["pid"], st["small"]["running"]["pid"]);
+    let ids: Vec<String> = s.get("/v1/models").await.1["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect();
+    assert!(ids.contains(&"8gent-small".to_string()), "{ids:?}");
+    // switching the selected model leaves the small one alone
+    s.chat("mockb/alpha", "hi").await;
+    assert_eq!(s.status().await["small"]["state"], "ready");
+    // one that will not load: the choice goes back, and the old one is serving again
+    let (code, _) = s.post("/8gent/v1/small", json!({"model": "alpha", "loader": "mockfail"})).await;
+    assert_eq!(code, 503);
+    assert_eq!(s.status().await["small"]["selection"]["model"], "beta");
+    assert_eq!(reply(&s.chat("8gent-small", "hi").await.1), "reply from mockb");
+    // off
+    let (code, v) = s.post("/8gent/v1/small", json!({"off": true})).await;
+    assert_eq!((code, v["loaded"].as_bool()), (200, Some(false)));
+    assert_eq!(s.status().await["small"]["state"], "stopped");
+    assert_eq!(s.chat("8gent-small", "hi").await.0, 503);
+}
+
+#[tokio::test]
+async fn a_load_that_cannot_fit_is_refused_before_anything_is_unloaded() {
+    let s = service().await;
+    assert_eq!(reply(&s.chat("8gent", "hi").await.1), "reply from mocka");
+    let knows_the_limit = s.status().await["memory"]["gpu_budget_bytes"].is_u64();
+    let (code, v) = s.post("/8gent/v1/select", json!({"model": "huge", "load": true})).await;
+    if knows_the_limit {
+        assert_eq!((code, v["error"]["code"].as_str(), v["can_force"].as_bool()), (409, Some("not_enough_memory"), Some(true)), "{v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("Huge at a 65536-token window needs about 90"), "{v}");
+        let st = s.status().await;
+        assert_eq!((st["selection"]["model"].as_str(), st["engine"]["state"].as_str()), (Some("alpha"), Some("ready")), "what was serving is untouched");
+        // the person can insist
+        let (code, v) = s.post("/8gent/v1/select", json!({"model": "huge", "load": true, "force": true})).await;
+        assert_eq!((code, v["loaded"].as_bool()), (200, Some(true)), "{v}");
+    } else {
+        // a computer whose limit 8gent does not know yet: nothing is refused
+        assert_eq!(code, 200, "{v}");
+    }
 }
 
 #[tokio::test]

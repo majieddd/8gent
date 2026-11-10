@@ -73,7 +73,8 @@ pub async fn handle(app: Arc<App>, method: Method, path_and_query: String, heade
     let began = Instant::now();
     let mut rec = RequestRecord { at: now(), loader: target.selection.loader.clone(), model: target.selection.model.clone(), path: path.clone(), stream, ..Default::default() };
 
-    let (run, guard) = match app.acquire(&target.selection).await {
+    let acquired = if target.small { app.acquire_small().await } else { app.acquire(&target.selection).await };
+    let (run, guard) = match acquired {
         Ok(x) => x,
         Err(e) => return finish_error(&app, rec, began, e),
     };

@@ -198,6 +198,7 @@ sending headers before the engine has answered at all; shared sampling defaults.
 | `POST /settings` | `{memory_mode?, idle_minutes?, auto_switch?}`, saved at once |
 | `POST /rescan` | look again for loaders and models; says which places have not answered yet |
 | `POST /shutdown` | stop the service and its engine |
+| `POST /small` | `{model, loader?, context?}` or `{off: true}`: the small always-on model |
 | `POST /login-item` | `{enabled}`: start at login or not (macOS: a launchd agent of the user) |
 | `GET /updates`, `POST /updates/check` | newer engines per loader: current, available, held (with the reason), or updated by its own app |
 | `POST /loaders/{id}/update` | install a loader's newest engine; `/updates` shows it running and how it ended |
@@ -224,10 +225,29 @@ Speeds are read back from the request log when the service starts, so they survi
 - **Leftovers:** the engine's process is recorded; a service that was killed ends the engine it left
   behind when it next starts. A service that is stopped normally stops its engine first.
 
-**Planned:** one memory budget across everything (refuse or queue a load that would push the
-computer into swap, counting what Ollama, LM Studio and other apps hold); measuring the loaded
-engine's peak to correct the estimate, as uzu Home 0.1.2 does; a second slot for a small always-on
-model next to the main one.
+- **What else holds memory.** The status lists the other holders of model memory 8gent knows of:
+  models loaded in Ollama (with their size) and the earlier Home apps' engines, and what is free
+  right now.
+- **A load that clearly cannot fit is refused** before what is serving is unloaded: when the
+  estimate is more than this computer's GPU can hold at all, or more than is free while one of
+  those holders has a model loaded. The answer names the holder ("Qwythos-9B-v2 needs about
+  14.7 GB and 11.5 GB is free, because Ollama (llama3.2:3b, 6.0 GB) is holding memory") and can be
+  overridden (`force`, "Load anyway"). An estimate that is merely tight is left to the person, and
+  a load started by a request is never refused.
+- **Measured.** The most an engine was seen to hold is kept per loader and model
+  (`state/memory.json`) and shown beside the estimate.
+
+### The small always-on model
+
+A second model, with its own engine, that stays loaded next to the selected one and answers under
+the name `8gent-small`: quick acknowledgements and titles while the large model works or is not
+loaded (kr8's plan has exactly this: Qwen3.5-0.8B under 1 GB). `8gent small <model>` or Settings
+chooses it; it gets an 8,192-token window unless one is named, is loaded at once and at every
+start, and is never unloaded for being idle. On the development Mac, Qwen3.5-0.8B on llama.cpp
+(0.3 GB) answered in 30 to 60 ms beside OxCoder-9B on TensorFold.
+
+**Planned:** counting LM Studio's loaded models; correcting the estimate from the measured peak;
+queuing a load until memory is free.
 
 ### Starting
 
@@ -267,7 +287,7 @@ then `8gent service install`.
 
 ## Testing
 
-`cargo test` runs 22 unit tests and 16 conformance tests; `npm test` in `app/` runs the app's logic
+`cargo test` runs 23 unit tests and 18 conformance tests; `npm test` in `app/` runs the app's logic
 tests. GitHub runs the service tests on macOS, Linux and Windows, and the app's checks, on every push. The conformance tests start the real
 service on a spare port, with its own data folder, against `mock-engine`: a stand-in engine whose
 quirks are switched on by flags (strict roles, errors inside 200 answers, compact stream lines, slow
@@ -357,7 +377,8 @@ In the order agreed:
    Done (`8gent service install`, `also_listen`). Their request history is not imported.
 3. ~~Engine install and update.~~ Done for Homebrew formulas and ready-made engines; building
    from source and TensorFold's 0.6 line are still to move in.
-4. One memory budget, peak-memory measurement, and a second slot for a small always-on model.
+4. ~~One memory budget, peak-memory measurement, and a second slot for a small always-on model.~~
+   Done in a first form (see Memory).
 5. Releases with in-app updates (GitHub and a page on the kr8 site); the Home apps' repositories
    then point here.
 6. Windows and Linux builds, with a job object on Windows so an engine never outlives the service.

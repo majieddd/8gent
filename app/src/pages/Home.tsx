@@ -49,9 +49,9 @@ export function Home({ svc, status, modelName, loaderName: nameOf, openModels, o
     <>
       <PageTitle>Home</PageTitle>
 
-      {status.also_loaded.length > 0 && (
+      {memory.holders.length > 0 && (
         <Notice>
-          {status.also_loaded.map((a) => a.app).join(" and ")} {status.also_loaded.length > 1 ? "also have models" : "also has a model"} loaded. Two loaded models may not fit in this computer's memory together.
+          Also holding memory for models right now: {memory.holders.map((h) => `${h.name} (${h.detail}${h.bytes ? `, ${gb(h.bytes)}` : ""})`).join(" and ")}. Two loaded models may not fit in this computer's memory together.
         </Notice>
       )}
 
@@ -80,7 +80,7 @@ export function Home({ svc, status, modelName, loaderName: nameOf, openModels, o
           <div className="flex flex-wrap gap-2.5">
             <Button variant="primary" onClick={() => openModels(target?.model)}>{target ? "Change model or loader" : "Choose a model"}</Button>
             {run && <Button onClick={() => act("stop", api.stop)} disabled={busy !== ""}>{busy === "stop" ? "Unloading" : "Unload"}</Button>}
-            {!run && target && engine.state !== "loading" && <Button onClick={() => act("start", api.start)} disabled={busy !== ""}>{busy === "start" ? "Loading" : "Load now"}</Button>}
+            {!run && target && engine.state !== "loading" && <Button onClick={() => act("start", () => api.start(error.includes("load anyway")))} disabled={busy !== ""}>{busy === "start" ? "Loading" : error.includes("load anyway") ? "Load anyway" : "Load now"}</Button>}
           </div>
         </div>
 

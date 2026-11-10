@@ -22,6 +22,10 @@ been built on Windows or Linux.
   request with the model `uzu/qwythos-9b-v2`. If the new engine does not come up, 8gent goes back
   to what was running and tells you the engine's own reason.
 - **Loads on demand, unloads when idle**, and never leaves an engine behind when it stops.
+- **Watches memory.** It knows what Ollama and the Home apps are holding, and refuses a load that
+  clearly cannot fit beside it, naming the holder (you can insist).
+- **A small model beside the main one.** Optionally a light model stays loaded and answers as
+  `8gent-small`, for quick acknowledgements while the large one works.
 - **Keeps engines up to date.** Once a day it looks for a newer llama.cpp, TensorFold and uzu and
   installs them when idle; a version that needs a newer macOS than you have is held, with the reason.
 - **Every loader behaves the same to clients:** the real context window in `/v1/models`, the
@@ -131,7 +135,7 @@ format. Put your own in the `loaders` folder of 8gent's data folder.
 cargo test
 ```
 
-22 unit tests and 16 conformance tests. The conformance tests run the real service against
+23 unit tests and 18 conformance tests. The conformance tests run the real service against
 `mock-engine`, a stand-in engine that reproduces each loader's quirks without a model or a GPU.
 `npm test` in `app/` runs the app's logic tests.
 

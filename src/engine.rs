@@ -99,6 +99,8 @@ struct Inner {
 
 pub struct Engine {
     paths: Paths,
+    /// Where this engine's process is written down, to find one a killed service left behind.
+    record: PathBuf,
     inner: Mutex<Inner>,
     http: reqwest::Client,
 }
@@ -288,8 +290,8 @@ fn free_port() -> Result<u16, String> {
 }
 
 impl Engine {
-    pub fn new(paths: Paths, http: reqwest::Client) -> Self {
-        Self { paths, http, inner: Mutex::new(Inner { child: None, running: None, state: State::Stopped, last_error: None, loading: None }) }
+    pub fn new(paths: Paths, http: reqwest::Client, record: PathBuf) -> Self {
+        Self { paths, record, http, inner: Mutex::new(Inner { child: None, running: None, state: State::Stopped, last_error: None, loading: None }) }
     }
 
     pub fn state(&self) -> State {
@@ -319,7 +321,7 @@ impl Engine {
                 g.running = None;
                 g.state = State::Error;
                 g.last_error = Some(format!("The engine stopped by itself ({status}).{}", log_tail(&self.paths.engine_log(&loader), 6)));
-                let _ = std::fs::remove_file(self.paths.engine_record());
+                let _ = std::fs::remove_file(&self.record);
             }
         }
         g.running.clone()
@@ -380,7 +382,7 @@ impl Engine {
             let child = cmd.spawn().map_err(|e| format!("{} could not be started ({}): {e}", plan.loader_name, program.display()))?;
             pid = child.id();
             let record = serde_json::json!({"pid": pid, "loader": plan.loader, "program": program.to_string_lossy(), "port": port});
-            let _ = std::fs::write(self.paths.engine_record(), record.to_string());
+            let _ = std::fs::write(&self.record, record.to_string());
             self.inner.lock().unwrap().child = Some(child);
         }
 
@@ -451,7 +453,7 @@ impl Engine {
         if let Some(mut child) = child {
             terminate(&mut child).await;
         }
-        let _ = std::fs::remove_file(self.paths.engine_record());
+        let _ = std::fs::remove_file(&self.record);
     }
 
     pub fn mark_stopped(&self) {
@@ -465,8 +467,8 @@ impl Engine {
     /// An engine a previous run of the service left behind (it was killed before it could stop it)
     /// still holds the model's memory. End it, after checking the process really is that program.
     pub fn end_leftover(&self) {
-        let Ok(text) = std::fs::read_to_string(self.paths.engine_record()) else { return };
-        let _ = std::fs::remove_file(self.paths.engine_record());
+        let Ok(text) = std::fs::read_to_string(&self.record) else { return };
+        let _ = std::fs::remove_file(&self.record);
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(&text) else { return };
         let (Some(pid), Some(program)) = (rec.get("pid").and_then(|p| p.as_u64()), rec.get("program").and_then(|p| p.as_str())) else { return };
         #[cfg(unix)]

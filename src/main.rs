@@ -15,6 +15,8 @@ const HELP: &str = "8gent: one local endpoint in front of any model loader
   8gent use <model> [--loader L] [--context N] [--thinking on|off] [--no-load]
                                       select a model (and loader); goes back if it will not load
   8gent start | stop                  load or unload the selected model
+  8gent small <model> [--loader L] [--context N] | off
+                                      a small model kept loaded next to it, answering as 8gent-small
   8gent logs [--loader L] [-n N]      the engine's own output
   8gent rescan                        look again for loaders and models
   8gent updates [check]               newer engines that are available
@@ -171,6 +173,22 @@ async fn client(command: &str, args: &[String]) -> Result<(), String> {
             post("/engine/stop", json!({})).await?;
             println!("unloaded");
         }
+        "small" => {
+            let what = args.first().ok_or("usage: 8gent small <model> [--loader L] [--context N] | off")?;
+            let mut body = if what == "off" { json!({"off": true}) } else { json!({"model": what}) };
+            if let Some(l) = option(args, &["--loader", "-l"]) {
+                body["loader"] = json!(l);
+            }
+            if let Some(c) = option(args, &["--context", "-c"]) {
+                body["context"] = json!(parse_size(c).ok_or(format!("\"{c}\" is not a context size (try 8192 or 8K)"))?);
+            }
+            let v = post("/small", body).await?;
+            if v["loaded"] == true {
+                println!("small model: {} on {}, loaded in {} s", s(&v["small"]["model"]), s(&v["small"]["loader"]), v["load_seconds"]);
+            } else {
+                println!("no small model");
+            }
+        }
         "updates" => {
             let v = if args.first().map(String::as_str) == Some("check") { post("/updates/check", json!({})).await? } else { get("/updates").await? };
             print_updates(&v);
@@ -280,6 +298,10 @@ fn print_status(v: &Value) {
         "loading" => println!("engine     loading {} on {} ({} s so far)", s(&engine["loading"]["model"]), s(&engine["loading"]["loader"]), engine["loading"]["seconds"]),
         "error" => println!("engine     problem: {}", s(&engine["error"])),
         _ => println!("engine     not loaded (the next request loads it)"),
+    }
+    if v["small"]["selection"]["model"].as_str().is_some_and(|m| !m.is_empty()) {
+        let sm = &v["small"];
+        println!("small      {} on {} as \"{}\": {}{}", s(&sm["selection"]["model"]), s(&sm["selection"]["loader"]), s(&sm["name"]), s(&sm["state"]), sm["memory_bytes"].as_f64().map(|b| format!(", {:.1} GB in memory", b / 1e9)).unwrap_or_default());
     }
     let t = &v["stats"]["totals"];
     println!("answered   {} requests ({} errors), {} tokens read, {} written; {} in progress", t["requests"], t["errors"], t["prompt_tokens"], t["completion_tokens"], v["stats"]["in_flight"]);

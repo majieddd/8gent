@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// The small model's window unless one is named: enough for an acknowledgement or a title, little memory.
+const SMALL_CONTEXT: u32 = 8192;
+
 /// What a loaded engine takes on top of its weights and KV cache (measured on 9B models: 0.6 to 1.1 GB).
 const RUNTIME_BYTES: u64 = 1_100_000_000;
 
@@ -58,6 +61,9 @@ pub struct App {
     first_run: std::sync::atomic::AtomicBool,
     pub library: RwLock<Library>,
     pub engine: Engine,
+    /// The engine of the small always-on model, with its own gate.
+    pub small: Engine,
+    pub small_gate: Arc<tokio::sync::RwLock<()>>,
     /// Requests hold it shared while an engine answers them; starting, stopping or switching the
     /// engine takes it alone, so no request loses its engine half way.
     pub gate: Arc<tokio::sync::RwLock<()>>,
@@ -67,6 +73,10 @@ pub struct App {
     pub total_memory: Option<u64>,
     /// Other apps on this computer that have a model loaded right now (the earlier Home apps).
     also_loaded: RwLock<Vec<String>>,
+    /// Everything else known to hold model memory right now: those apps, and models loaded in Ollama.
+    holders: RwLock<Vec<Holder>>,
+    /// Peak engine memory per "loader/model", kept in state/memory.json.
+    measured: std::sync::Mutex<BTreeMap<String, Measured>>,
     /// Told to stop through the control API.
     pub quit: tokio::sync::Notify,
     /// The extra ports that are answering right now.
@@ -81,6 +91,22 @@ pub struct App {
     started: Instant,
     import_external: bool,
     housekeeping_every: Duration,
+}
+
+/// Something else on this computer that holds memory a model would need.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Holder {
+    pub name: String,
+    pub detail: String,
+    pub bytes: Option<u64>,
+}
+
+/// The most memory an engine was seen to hold for one loader, model, window and conversation count.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Measured {
+    pub context: u32,
+    pub sessions: u32,
+    pub bytes: u64,
 }
 
 /// What the service was doing during one second.
@@ -119,6 +145,8 @@ impl IntoResponse for ApiErr {
 /// What a request's `model` field resolved to.
 pub struct Target {
     pub selection: Selection,
+    /// The request is for the small always-on model, which has its own engine.
+    pub small: bool,
     /// The name the client used, written back into the answer.
     pub requested: String,
 }
@@ -139,10 +167,13 @@ impl App {
         }
         let manifests = manifest::load_all(&paths)?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).pool_idle_timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
-        let engine = Engine::new(paths.clone(), http.clone());
+        let engine = Engine::new(paths.clone(), http.clone(), paths.engine_record());
         engine.end_leftover();
+        let small = Engine::new(paths.clone(), http.clone(), paths.state().join("engine-small.json"));
+        small.end_leftover();
         let stats = Recorder::new(Some(paths.perf_log()));
         stats.restore_speeds();
+        let paths_state = paths.state();
         let app = Arc::new(Self {
             stats,
             paths,
@@ -156,11 +187,15 @@ impl App {
             first_run: std::sync::atomic::AtomicBool::new(first_run),
             library: RwLock::new(Library::default()),
             engine,
+            small,
+            small_gate: Arc::new(tokio::sync::RwLock::new(())),
             gate: Arc::new(tokio::sync::RwLock::new(())),
             http,
             os_version: host::os_version(),
             total_memory: host::total_memory(),
             also_loaded: RwLock::new(vec![]),
+            holders: RwLock::new(vec![]),
+            measured: std::sync::Mutex::new(std::fs::read_to_string(paths_state.join("memory.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()),
             quit: tokio::sync::Notify::new(),
             aliases: RwLock::new(vec![]),
             updates: RwLock::new(BTreeMap::new()),
@@ -243,7 +278,52 @@ impl App {
                 }
             }
         }
+        let mut holders: Vec<Holder> = loaded.iter().map(|app| Holder { name: app.clone(), detail: "has a model loaded".into(), bytes: None }).collect();
         *self.also_loaded.write().unwrap() = loaded;
+        // models Ollama has in memory right now (it loads and unloads them itself)
+        if self.import_external {
+            let ps: Option<Value> = async { self.http.get("http://127.0.0.1:11434/api/ps").timeout(Duration::from_millis(800)).send().await.ok()?.json().await.ok() }.await;
+            for m in ps.as_ref().and_then(|p| p.get("models")).and_then(|m| m.as_array()).into_iter().flatten() {
+                let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("a model");
+                // not the one 8gent itself is serving through Ollama
+                if self.engine.current().is_some_and(|r| r.loader == "ollama" && r.engine_model == name) {
+                    continue;
+                }
+                holders.push(Holder { name: "Ollama".into(), detail: name.to_string(), bytes: m.get("size_vram").or(m.get("size")).and_then(|b| b.as_u64()) });
+            }
+        }
+        *self.holders.write().unwrap() = holders;
+    }
+
+    /// Why loading `plan` now cannot work, if that is clear: it needs more than this computer's GPU
+    /// can hold at all, or more than is free while another program is holding a model. An estimate
+    /// that is merely tight is left to the person (the screens warn).
+    pub fn memory_refusal(&self, plan: &Plan) -> Option<String> {
+        if !plan.managed {
+            return None;
+        }
+        let need = Self::estimate(&plan.build, plan.context, plan.sessions)?;
+        let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+        if let Some(budget) = host::gpu_budget(self.total_memory) {
+            if need > budget {
+                return Some(format!("{} at a {}-token window needs about {}; this computer's GPU can hold {}. Choose a smaller window.", plan.model_name, plan.context, gb(need), gb(budget)));
+            }
+        }
+        let holders = self.holders.read().unwrap().clone();
+        if holders.is_empty() {
+            return None;
+        }
+        // what is free now, plus what the engine 8gent would unload first gives back
+        let freed = self.engine.current().and_then(|r| r.pid).and_then(engine::process_memory).unwrap_or(0);
+        let free = host::available_memory()? + freed;
+        if need <= free {
+            return None;
+        }
+        let who: Vec<String> = holders.iter().map(|h| match h.bytes {
+            Some(b) => format!("{} ({}, {})", h.name, h.detail, gb(b)),
+            None => format!("{} ({})", h.name, h.detail),
+        }).collect();
+        Some(format!("{} needs about {} and {} is free, because {} {} holding memory. Unload it there, or load anyway.", plan.model_name, gb(need), gb(free), who.join(" and "), if who.len() == 1 { "is" } else { "are" }))
     }
 
     /// Look (again) for loaders and models. Every place models are read from is read on its own and
@@ -316,6 +396,12 @@ impl App {
         let cfg = self.config();
         let name = model_field.unwrap_or("").trim();
         let requested = if name.is_empty() { cfg.served_name.clone() } else { name.to_string() };
+        if name == format!("{}-small", cfg.served_name) {
+            if !cfg.small.is_set() {
+                return Err(ApiErr::unavailable("No small always-on model is chosen. Choose one in 8gent's Settings (or run `8gent small <model>`)."));
+            }
+            return Ok(Target { selection: cfg.small.clone(), requested, small: true });
+        }
         let mut sel = cfg.selection.clone();
         let mut explicit = false;
         if let Some((loader, model)) = name.split_once('/') {
@@ -343,7 +429,7 @@ impl App {
             g.selection = sel.clone();
             let _ = g.save(&self.paths);
         }
-        Ok(Target { selection: sel, requested })
+        Ok(Target { selection: sel, requested, small: false })
     }
 
     /// An engine that serves `sel`, started or switched to if needed, with the gate held shared so
@@ -367,9 +453,71 @@ impl App {
         Err(ApiErr::unavailable("The engine kept changing while this request waited. Try again."))
     }
 
+    /// The small model's engine, started if it is not running. It is never unloaded for being idle.
+    pub async fn acquire_small(&self) -> Result<(Running, tokio::sync::OwnedRwLockReadGuard<()>), ApiErr> {
+        let sel = self.config().small;
+        if !sel.is_set() {
+            return Err(ApiErr::unavailable("No small always-on model is chosen."));
+        }
+        for _ in 0..3 {
+            let plan = self.plan(&sel).map_err(ApiErr::unavailable)?;
+            let guard = self.small_gate.clone().read_owned().await;
+            if let Some(run) = self.small.current().filter(|r| r.serves(&plan)) {
+                return Ok((run, guard));
+            }
+            drop(guard);
+            let _alone = self.small_gate.clone().write_owned().await;
+            if self.small.current().is_some_and(|r| r.serves(&plan)) {
+                continue;
+            }
+            self.small.stop().await;
+            let version = self.loader_version(&plan.loader);
+            self.small.start(plan, version).await.map_err(ApiErr::unavailable)?;
+        }
+        Err(ApiErr::unavailable("The small model's engine kept changing while this request waited. Try again."))
+    }
+
+    /// Choose the small always-on model (or none). It is loaded at once; if it does not load, the
+    /// choice goes back to what it was.
+    pub async fn set_small(&self, new: Selection) -> Result<Value, ApiErr> {
+        let previous = self.config().small;
+        if new.is_set() {
+            let plan = self.plan(&new).map_err(ApiErr::bad_request)?;
+            if !plan.managed {
+                return Err(ApiErr::bad_request(format!("The small model has to be one 8gent loads itself; {} loads its own.", plan.loader_name)));
+            }
+        }
+        let save = |sel: &Selection| -> Result<(), ApiErr> {
+            let mut g = self.cfg.write().unwrap();
+            g.small = sel.clone();
+            g.save(&self.paths).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None))
+        };
+        {
+            let _alone = self.small_gate.clone().write_owned().await;
+            self.small.stop().await;
+            self.small.mark_stopped();
+            save(&new)?;
+        }
+        if !new.is_set() {
+            return Ok(json!({"ok": true, "small": new, "loaded": false}));
+        }
+        match self.acquire_small().await {
+            Ok((run, _)) => Ok(json!({"ok": true, "small": new, "loaded": true, "load_seconds": run.load_seconds})),
+            Err(e) => {
+                save(&previous)?;
+                if previous.is_set() {
+                    let _ = self.acquire_small().await;
+                } else {
+                    self.small.mark_stopped();
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Change what is selected. With `load`, the new engine must come up, or everything goes back to
     /// how it was (and what was running is started again).
-    pub async fn select(&self, new: Selection, load: Option<bool>) -> Result<Value, ApiErr> {
+    pub async fn select(&self, new: Selection, load: Option<bool>, force: bool) -> Result<Value, ApiErr> {
         let plan = self.plan(&new).map_err(ApiErr::bad_request)?;
         let _alone = self.gate.clone().write_owned().await;
         let previous = self.config().selection;
@@ -378,6 +526,14 @@ impl App {
         if was_running.as_ref().is_some_and(|r| r.serves(&plan)) {
             self.save_selection(&new)?;
             return Ok(json!({"ok": true, "selection": new, "loaded": true, "restarted": false}));
+        }
+        // a load that clearly cannot fit is refused before what is serving is unloaded
+        if load && !force {
+            if let Some(reason) = self.memory_refusal(&plan) {
+                let mut body = error_body(reason, "not_enough_memory", Some("not_enough_memory"));
+                body["can_force"] = json!(true);
+                return Err(ApiErr { status: StatusCode::CONFLICT, body });
+            }
         }
         self.engine.stop().await;
         self.engine.mark_stopped();
@@ -552,7 +708,21 @@ impl App {
             let total = self.live_tokens.load(Ordering::Relaxed);
             let state = self.engine.state();
             let pid = self.engine.current().and_then(|r| r.pid);
+            let running = self.engine.current();
             let sample = Sample { at: now(), tokens_per_second: total.saturating_sub(last) as f64, in_flight: self.stats.in_flight(), memory_bytes: pid.and_then(engine::process_memory), state };
+            // remember the most this loader and model were seen to hold, for the next estimate
+            if let (Some(run), Some(bytes)) = (running.filter(|r| r.managed), sample.memory_bytes) {
+                let key = format!("{}/{}", run.loader, run.model);
+                let mut g = self.measured.lock().unwrap();
+                let grew = match g.get(&key) {
+                    Some(m) if m.context == run.context && m.sessions == run.sessions => bytes > m.bytes + m.bytes / 100,
+                    _ => true,
+                };
+                if grew {
+                    g.insert(key, Measured { context: run.context, sessions: run.sessions, bytes });
+                    let _ = std::fs::write(self.paths.state().join("memory.json"), serde_json::to_vec(&*g).unwrap_or_default());
+                }
+            }
             last = total;
             let mut g = self.monitor.lock().unwrap();
             g.push_back(sample);
@@ -687,6 +857,7 @@ impl App {
                             "kv_bytes_per_token": build.kv_bytes_per_token.filter(|_| managed), "sessions": sessions,
                             "estimated_memory_bytes": Self::estimate(build, context, sessions).filter(|_| managed),
                             "capabilities": m.capabilities,
+                            "measured": self.measured.lock().unwrap().get(&format!("{}/{}", m.id, model.id)).cloned(),
                             "speed": self.stats.speed_for(&m.id, &model.id),
                         }))
                     })
@@ -716,7 +887,11 @@ impl App {
             "selection": cfg.selection,
             "engine": {"state": state, "running": running, "memory_bytes": memory, "loading": loading,
                        "error": if state == EngineState::Error { self.engine.last_error() } else { None }},
-            "memory": {"total_bytes": self.total_memory, "gpu_budget_bytes": host::gpu_budget(self.total_memory)},
+            "small": {"selection": cfg.small, "name": format!("{}-small", cfg.served_name), "state": self.small.state(), "running": self.small.current(),
+                      "memory_bytes": self.small.current().and_then(|r| r.pid).and_then(engine::process_memory),
+                      "error": if self.small.state() == EngineState::Error { self.small.last_error() } else { None }},
+            "memory": {"total_bytes": self.total_memory, "gpu_budget_bytes": host::gpu_budget(self.total_memory),
+                       "available_bytes": host::available_memory(), "holders": self.holders.read().unwrap().clone()},
             "stats": self.stats.snapshot(20),
         })
     }
@@ -731,6 +906,12 @@ impl App {
         if cfg.selection.is_set() {
             if let (Some(m), Ok(plan)) = (self.manifest(&cfg.selection.loader), self.plan(&cfg.selection)) {
                 data.push(json!({"id": cfg.served_name, "object": "model", "owned_by": "8gent", "context_length": plan.context,
+                    "max_context_length": plan.build.max_context, "loader": m.id, "model": plan.model, "capabilities": caps(m)}));
+            }
+        }
+        if cfg.small.is_set() {
+            if let (Some(m), Ok(plan)) = (self.manifest(&cfg.small.loader), self.plan(&cfg.small)) {
+                data.push(json!({"id": format!("{}-small", cfg.served_name), "object": "model", "owned_by": "8gent", "context_length": plan.context,
                     "max_context_length": plan.build.max_context, "loader": m.id, "model": plan.model, "capabilities": caps(m)}));
             }
         }
@@ -776,6 +957,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/8gent/v1/rescan", post(rescan))
         .route("/8gent/v1/shutdown", post(shutdown))
         .route("/8gent/v1/login-item", post(login_item))
+        .route("/8gent/v1/small", post(small))
         .route("/8gent/v1/updates", get(updates))
         .route("/8gent/v1/updates/check", post(updates_check))
         .route("/8gent/v1/loaders/{id}/update", post(loader_update))
@@ -964,16 +1146,25 @@ async fn select(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, hea
     let context = body.get("context").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(if model == current.model { current.context } else { 0 });
     let thinking = body.get("thinking").and_then(|v| v.as_bool()).unwrap_or(current.thinking);
     let load = body.get("load").and_then(|v| v.as_bool());
-    app.select(Selection { loader, model, context, thinking }, load).await.map(Json)
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    app.select(Selection { loader, model, context, thinking }, load, force).await.map(Json)
 }
 
-async fn engine_start(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+async fn engine_start(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Option<Json<Value>>) -> Result<Json<Value>, ApiErr> {
     authorize(&app, &remote, &headers, true)?;
     let sel = app.config().selection;
     if !sel.is_set() {
         return Err(ApiErr::bad_request("Nothing is selected yet."));
     }
     app.touch();
+    let force = body.as_ref().and_then(|b| b.get("force")).and_then(|v| v.as_bool()).unwrap_or(false);
+    if !force && app.engine.current().is_none() {
+        if let Some(reason) = app.plan(&sel).ok().and_then(|plan| app.memory_refusal(&plan)) {
+            let mut body = error_body(reason, "not_enough_memory", Some("not_enough_memory"));
+            body["can_force"] = json!(true);
+            return Err(ApiErr { status: StatusCode::CONFLICT, body });
+        }
+    }
     let (run, _guard) = app.acquire(&sel).await?;
     Ok(Json(json!({"ok": true, "running": run})))
 }
@@ -1030,6 +1221,21 @@ async fn loader_update(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAdd
         let _ = running.update_loader(&id).await;
     });
     Ok(Json(json!({"ok": true, "started": true})))
+}
+
+/// Choose the small always-on model: `{model, loader?, context?}`, or `{off: true}` for none.
+async fn small(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    if body.get("off").and_then(|v| v.as_bool()) == Some(true) {
+        return app.set_small(Selection::default()).await.map(Json);
+    }
+    let model = body.get("model").and_then(|v| v.as_str()).ok_or_else(|| ApiErr::bad_request("Name a model, or send off: true."))?.to_string();
+    let loader = match body.get("loader").and_then(|v| v.as_str()) {
+        Some(l) => l.to_string(),
+        None => app.loaders_for(&model).iter().find(|m| m.kind == Kind::Managed).map(|m| m.id.clone()).ok_or_else(|| ApiErr::bad_request(format!("No loader that 8gent starts itself can run {model} here.")))?,
+    };
+    let context = body.get("context").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(SMALL_CONTEXT);
+    app.set_small(Selection { loader, model, context, thinking: false }).await.map(Json)
 }
 
 /// Start at login, or stop doing so: `{enabled}`. Switching it on while the service was started some
@@ -1102,6 +1308,19 @@ pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: i
             }
         });
     }
+    if app.config().small.is_set() {
+        let a = app.clone();
+        tokio::spawn(async move {
+            let sel = a.config().small;
+            let began = Instant::now();
+            while a.library.read().unwrap().get(&sel.model).is_none() && began.elapsed() < Duration::from_secs(120) {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            if let Err(e) = a.acquire_small().await {
+                eprintln!("8gent: could not load the small model {}: {}", sel.model, normalize::error_message(&e.body).unwrap_or_default());
+            }
+        });
+    }
     let asked = app.clone();
     let stop = async move {
         tokio::select! {
@@ -1111,6 +1330,7 @@ pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: i
     };
     let result = axum::serve(listener, router(app.clone()).into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(stop).await;
     app.engine.stop().await;
+    app.small.stop().await;
     result.map_err(|e| e.to_string())
 }
 

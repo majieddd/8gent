@@ -95,13 +95,14 @@ export function Notice({ children, action, tone = "warn", detail }: { children: 
   );
 }
 
-export function Stat({ label, value, note, children }: { label: string; value: ReactNode; note?: ReactNode; children?: ReactNode }) {
+export function Stat({ label, value, note, measured, children }: { label: string; value: ReactNode; note?: ReactNode; measured?: string; children?: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <span className="text-xs text-muted">{label}</span>
       <span className="text-lg font-semibold leading-6">{value}</span>
       {children}
       {note && <span className="text-xs text-muted">{note}</span>}
+      {measured && <span className="text-xs text-muted">{measured}</span>}
     </div>
   );
 }

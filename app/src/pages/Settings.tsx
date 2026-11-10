@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CopyButton, Theme } from "../App";
+import { gb } from "../lib/format";
 import { Button, Card, cx, Label, Notice, PageTitle, Segmented } from "../components/ui";
 import { api, ApiError, Status } from "../lib/api";
 import { Service } from "../lib/useService";
@@ -36,6 +37,29 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
     }
     await svc.refresh();
   };
+  // models 8gent loads itself, smallest first: the small slot is for something light
+  const [settingSmall, setSettingSmall] = useState(false);
+  const candidates = svc.models
+    .flatMap((m) => m.loaders.filter((l) => l.kind === "managed" && l.runnable).map((l) => ({ value: `${l.id}/${m.id}`, label: `${m.name} on ${l.name}${l.size_bytes ? ` (${gb(l.size_bytes)})` : ""}`, size: l.size_bytes ?? Number.MAX_SAFE_INTEGER })))
+    .sort((a, b) => a.size - b.size);
+  const small = status.small;
+  const smallValue = small.selection.model ? `${small.selection.loader}/${small.selection.model}` : "";
+  const chooseSmall = async (value: string) => {
+    setSettingSmall(true);
+    setError("");
+    try {
+      if (!value) await api.small({ off: true });
+      else {
+        const [loader, ...model] = value.split("/");
+        await api.small({ loader, model: model.join("/") });
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message.split("\n\n")[0] : "The service did not answer.");
+    }
+    await svc.refresh();
+    setSettingSmall(false);
+  };
+
   const stopService = async () => {
     setStopping(true);
     try {
@@ -68,6 +92,26 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
               <Segmented label="Unload after" value={status.idle_minutes} onChange={(idle_minutes) => save({ idle_minutes })} options={[5, 15, 30, 60].concat([5, 15, 30, 60].includes(status.idle_minutes) ? [] : [status.idle_minutes]).sort((a, b) => a - b).map((m) => ({ value: m, label: `${m} min` }))} />
             </Row>
           )}
+        </Card>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <Label>Small always-on model</Label>
+        <Card>
+          <Row
+            title={small.selection.model ? `Answers as "${small.name}"` : "None"}
+            hint={
+              small.selection.model
+                ? `${settingSmall || small.state === "loading" ? "Loading" : small.state === "ready" ? `Loaded${small.memory_bytes ? `, ${gb(small.memory_bytes)} in memory` : ""}` : small.state === "error" ? "It did not load" : "Not loaded"}. It stays loaded next to the selected model, for quick acknowledgements and titles.`
+                : "A second, light model that stays loaded next to the selected one, for quick acknowledgements and titles while the large model works or is not loaded."
+            }
+          >
+            <label className="sr-only" htmlFor="small-model">Small always-on model</label>
+            <select id="small-model" value={smallValue} disabled={settingSmall} onChange={(e) => chooseSmall(e.target.value)} className="h-9 max-w-[320px] rounded-lg border border-line bg-card px-3 text-fg">
+              <option value="">None</option>
+              {candidates.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+          </Row>
         </Card>
       </section>
 
