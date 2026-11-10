@@ -121,8 +121,9 @@ format. Put your own in the `loaders` folder of 8gent's data folder.
 cargo test
 ```
 
-17 unit tests and 15 conformance tests. The conformance tests run the real service against
+18 unit tests and 15 conformance tests. The conformance tests run the real service against
 `mock-engine`, a stand-in engine that reproduces each loader's quirks without a model or a GPU.
+`npm test` in `app/` runs the app's logic tests.
 
 ## Source
 

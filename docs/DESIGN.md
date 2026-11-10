@@ -20,6 +20,12 @@ this repository and covered by the tests described under [Testing](#testing).
 | Brand | Part of the kr8 family: lowercase name, kr8's neutral palette, the rainbow "8". |
 | Licence | MIT. |
 | Home apps | uzu Home and TensorFold Home stop development and point here; 8gent imports their setup. |
+| Daily setup | 8gent starts at login; the Home apps no longer start their endpoints. 8gent also answers on their old ports (8585, 8484), and Hermes is pointed at 8gent's own address. |
+| Harnesses | Three levels, for Hermes, kr8's agent, opencode and Claude Code: configure them to use 8gent, run them, and serve a whole agent as an endpoint. |
+| Chat | 8gent's own Chat screen, with an agent's abilities and previews once the harness layer exists. It holds only the conversations held in it; requests from other harnesses show in Requests, not in Chat. No Open WebUI. |
+| Signing | Unsigned for now, like the Home apps. |
+| Releases | GitHub releases on this repository, and a page on the kr8 site. |
+| Other systems | Built by GitHub for Windows, Linux and macOS; tested on Windows first. |
 
 ## Shape
 
@@ -217,7 +223,8 @@ its context window and number of conversations. Nothing is loaded until a reques
 
 ## Testing
 
-`cargo test` runs 17 unit tests and 15 conformance tests. The conformance tests start the real
+`cargo test` runs 18 unit tests and 15 conformance tests; `npm test` in `app/` runs the app's logic
+tests. GitHub runs the service tests on macOS, Linux and Windows, and the app's checks, on every push. The conformance tests start the real
 service on a spare port, with its own data folder, against `mock-engine`: a stand-in engine whose
 quirks are switched on by flags (strict roles, errors inside 200 answers, compact stream lines, slow
 prompt reads, a model that will not load). They cover the model list, waking, names, streams and
@@ -275,20 +282,40 @@ behind it with no new transport. What changes in kr8, each in a new kr8 file as 
 
 kr8's plan for a small always-on model next to the main one is the "second slot" above.
 
-## Agent harnesses (later)
+## Agent harnesses (planned)
 
-The same pattern one level up: a harness (Hermes, others) described by a file, started and pointed
-at 8gent's endpoint by the service, chosen in the app next to the loader and model. Nothing of this
-is built; the loader work comes first.
+The same pattern one level up. A harness (Hermes, kr8's agent, opencode, Claude Code) is described
+by a file, like a loader, and 8gent works with it at three levels:
+
+1. **Configure.** 8gent points the harness at its endpoint (writing the harness's own config, with a
+   backup) and shows which harnesses are connected.
+2. **Run.** 8gent starts and stops the harness and shows its sessions and logs.
+3. **Serve.** 8gent offers a whole agent as an endpoint, so kr8 or another app calls "the agent"
+   the way it calls a model.
+
+The Chat screen is the first client of level 2: a conversation in it runs through the harness you
+choose, with its tool calls and previews shown. Before the harness layer exists, Chat talks to the
+loaded model directly.
+
+kr8 already drives its harnesses through the Agent Client Protocol (its `buzz-acp` bridge, with
+`hermes-acp` and Claude Code among the presets), so that protocol is the first candidate for levels
+2 and 3. Which protocol each harness really offers is to be checked when this work starts; nothing
+of this section is built.
 
 ## Next steps
 
-1. The app: Chat and Monitor, then a signed build with its own updates.
-2. Engine install and update, starting with the uzu and TensorFold paths the Home apps have.
-3. Peak-memory measurement and the memory budget.
-4. Windows and Linux builds, with a job object on Windows so an engine never outlives the service.
-5. The Home apps' old ports and history import; then their repositories point here.
-6. kr8 detection and context length.
+In the order agreed:
+
+1. Chat (direct to the model) and Monitor screens.
+2. Daily setup on a Mac: start at login, the Home apps' old ports, Hermes pointed here, history
+   import.
+3. Engine install and update, starting with the uzu and TensorFold paths the Home apps have.
+4. One memory budget, peak-memory measurement, and a second slot for a small always-on model.
+5. Releases with in-app updates (GitHub and a page on the kr8 site); the Home apps' repositories
+   then point here.
+6. Windows and Linux builds, with a job object on Windows so an engine never outlives the service.
+7. kr8: detection and the real context window, on a branch of kr8 with a draft pull request.
+8. The harness layer, and with it Chat's agent abilities.
 
 ## Open
 

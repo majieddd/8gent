@@ -40,7 +40,7 @@ export function Requests({ modelName, loaderName }: { modelName: (id: string) =>
                     <td className="px-4 py-2.5 font-mono text-xs text-muted">{clock(r.at)}</td>
                     <td className="max-w-[220px] truncate px-4 py-2.5">{modelName(r.model)}</td>
                     <td className="px-4 py-2.5 text-muted">{loaderName(r.loader)}{r.stream ? "" : " · whole answer"}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">{count(r.prompt_tokens)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{r.finish === "overflow" && r.prompt_tokens ? `about ${count(r.prompt_tokens)}` : count(r.prompt_tokens)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums">{count(r.completion_tokens)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-muted">{seconds(r.first_token_ms)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums">{r.tokens_per_second ? `${r.tokens_per_second.toFixed(1)} tok/s` : ""}</td>

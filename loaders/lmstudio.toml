@@ -9,7 +9,7 @@ formats = ["lmstudio"]
 [detect]
 command = "lms"
 paths = ["~/.lmstudio/bin/lms"]
-version_args = ["version"]
+# `lms version` prints a banner and a commit, no version number, so none is shown
 
 [attach]
 base_url = "http://127.0.0.1:1234/v1"

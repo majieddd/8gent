@@ -4,6 +4,8 @@ import { Service } from "../lib/useService";
 import { requirementNotes } from "./Models";
 import { useState } from "react";
 
+const FORMAT_NAMES: Record<string, string> = { gguf: "GGUF files", mlx: "MLX builds", uzu: "folders converted for uzu", mirai: "Mirai's builds", ollama: "what Ollama has pulled", lmstudio: "what LM Studio has loaded", strata: "Strata's packs" };
+
 function loaderState(l: Loader): { tone: "ok" | "warn" | "off"; text: string } {
   if (!l.supported_here) return { tone: "off", text: "Not for this kind of computer" };
   if (l.kind === "attach") {
@@ -32,7 +34,7 @@ export function Loaders({ svc }: { svc: Service }) {
         {svc.loaders.map((l) => {
           const state = loaderState(l);
           const c = l.capabilities;
-          const chips = [`Runs ${l.formats.join(", ")}`, c.tools && "Tools", c.json_schema && "JSON schema", c.vision && "Pictures", c.anthropic_api && "Anthropic API", c.sessions > 1 && `Up to ${c.sessions} conversations`].filter(Boolean) as string[];
+          const chips = [`Runs ${l.formats.map((f) => FORMAT_NAMES[f] ?? f).join(" and ")}`, c.tools && "Tools", c.json_schema && "JSON schema", c.vision && "Pictures", c.anthropic_api && "Anthropic API", c.sessions > 1 && `Up to ${c.sessions} conversations`].filter(Boolean) as string[];
           return (
             <Card key={l.id} tone={l.selected ? "accent" : undefined} className="flex flex-col gap-3 px-5 py-[18px]">
               <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -43,7 +45,7 @@ export function Loaders({ svc }: { svc: Service }) {
                 <State tone={state.tone}>{state.text}</State>
               </div>
               <p className="m-0 max-w-3xl text-muted">
-                {l.description} {l.kind === "managed" ? "8gent starts and stops it." : `8gent uses the server ${l.name} runs.`}
+                {l.description}{l.kind === "managed" ? " 8gent starts and stops it." : ""}
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <Chip>{l.models.length === 1 ? "1 model here" : `${l.models.length} models here`}</Chip>

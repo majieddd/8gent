@@ -232,9 +232,51 @@ fn run_for_version(program: &PathBuf, args: &[String]) -> Option<String> {
     }
     let out = child.wait_with_output().ok()?;
     let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    // a line that says "version" is the one meant; other lines can hold unrelated numbers
-    let line = text.lines().find(|l| l.to_lowercase().contains("version")).unwrap_or_else(|| text.lines().find(|l| !l.trim().is_empty()).unwrap_or(""));
-    first_version(line)
+    version_in(&text)
+}
+
+/// The version in a program's version output. A line that says "version" is the one meant; without
+/// one, only a dotted number counts, because other lines can hold unrelated numbers (LM Studio's
+/// `lms version` prints a coloured banner and no version at all).
+pub fn version_in(output: &str) -> Option<String> {
+    let text = strip_ansi(output);
+    if let Some(line) = text.lines().find(|l| l.to_lowercase().contains("version")) {
+        return first_version(line);
+    }
+    text.lines().filter_map(first_version).find(|v| v.contains('.'))
+}
+
+/// Text without terminal colour codes (ESC [ ... letter).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_in;
+
+    #[test]
+    fn versions_from_program_output() {
+        assert_eq!(version_in("load_backend: loaded /opt/ggml/0.9.11/lib\nversion: 8680 (15f786e65)\nbuilt with Apple clang").as_deref(), Some("8680"));
+        assert_eq!(version_in("tensorfold-native 1.2.6").as_deref(), Some("1.2.6"));
+        assert_eq!(version_in("ollama version is 0.40.16").as_deref(), Some("0.40.16"));
+        // a coloured banner and no version: nothing, not the "38" of a colour code
+        assert_eq!(version_in("\u{1b}[38;5;166m   __   __  ___\u{1b}[0m\nlms is LM Studio's CLI utility\nCLI commit: 71bd99c"), None);
+    }
 }
 
 fn free_port() -> Result<u16, String> {

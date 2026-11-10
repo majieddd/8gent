@@ -125,10 +125,13 @@ struct Shared {
 
 impl Shared {
     /// The standard overflow answer, counted.
-    fn overflow(&self, engine_error: &Value) -> Value {
+    fn overflow(&self, engine_error: &Value, rec: &mut RequestRecord) -> Value {
         let exact = normalize::overflow_tokens(engine_error, self.run.context);
         let tokens = exact.or(Some(self.estimate).filter(|n| *n > 0));
         self.app.stats.overflow(self.run.context, tokens);
+        // the request log shows how long the prompt that did not fit was
+        rec.finish = "overflow".into();
+        rec.prompt_tokens = tokens;
         normalize::overflow_error(self.run.context, tokens, exact.is_some())
     }
 }
@@ -184,9 +187,8 @@ async fn json_response(ctx: &Shared, resp: reqwest::Response, rec: &mut RequestR
     };
     if normalize::error_message(&doc).is_some() {
         if normalize::is_overflow(&doc, &ctx.markers) {
-            rec.finish = "overflow".into();
             rec.status = 400;
-            return json_out(StatusCode::BAD_REQUEST, &ctx.overflow(&doc));
+            return json_out(StatusCode::BAD_REQUEST, &ctx.overflow(&doc, rec));
         }
         // some engines (uzu) report an error in a 200 answer; a client must see it as an error
         let status = if status.is_success() { StatusCode::INTERNAL_SERVER_ERROR } else { status };
@@ -261,8 +263,7 @@ async fn stream_response(ctx: Shared, resp: reqwest::Response, mut rec: RequestR
                 Hold::Commit => break,
                 Hold::Error(ev) => {
                     let (status, body) = if normalize::is_overflow(&ev, &ctx.markers) {
-                        rec.finish = "overflow".into();
-                        (StatusCode::BAD_REQUEST, ctx.overflow(&ev))
+                        (StatusCode::BAD_REQUEST, ctx.overflow(&ev, &mut rec))
                     } else {
                         rec.finish = "error".into();
                         (StatusCode::INTERNAL_SERVER_ERROR, ev)

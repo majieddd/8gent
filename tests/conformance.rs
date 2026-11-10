@@ -34,7 +34,7 @@ name = "{id}"
 kind = "managed"
 formats = [{formats}]
 [detect]
-paths = ["{engine}"]
+paths = ['{engine}']
 [start]
 args = ["--port", "{{port}}", "--name", "{id}", "--model-id", "{{model_id}}"{extra_args}]
 ready_path = "/health"
@@ -338,6 +338,7 @@ async fn keep_loaded_mode_does_not_unload() {
     assert_eq!(s.status().await["engine"]["state"], "ready");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_engine_that_dies_is_noticed_and_started_again_on_the_next_request() {
     let s = service().await;
