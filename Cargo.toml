@@ -1,0 +1,42 @@
+[package]
+name = "eightgent"
+version = "0.1.0"
+edition = "2024"
+description = "8gent: one local endpoint for any model loader (uzu, TensorFold, llama.cpp, Ollama, LM Studio, Strata)"
+license = "MIT"
+repository = "https://github.com/majieddd/8gent"
+default-run = "8gent"
+
+[lib]
+name = "eightgent"
+path = "src/lib.rs"
+
+# The one binary: `8gent serve` is the service, every other subcommand is a client of it.
+[[bin]]
+name = "8gent"
+path = "src/main.rs"
+
+# A stand-in engine for the conformance tests: an OpenAI-style server with switchable quirks.
+[[bin]]
+name = "mock-engine"
+path = "src/bin/mock_engine.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util", "net", "signal"] }
+toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

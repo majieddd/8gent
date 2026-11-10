@@ -1,0 +1,32 @@
+# llama.cpp's server: runs GGUF files. 8gent starts one llama-server per loaded model.
+id = "llamacpp"
+name = "llama.cpp"
+description = "GGUF models on llama.cpp's server. Runs on Mac, Windows and Linux; the widest choice of models."
+homepage = "https://github.com/ggml-org/llama.cpp"
+kind = "managed"
+formats = ["gguf"]
+
+[detect]
+command = "llama-server"
+paths = ["{data}/engines/llamacpp/llama-server", "/opt/homebrew/bin/llama-server", "/usr/local/bin/llama-server"]
+version_args = ["--version"]
+
+[start]
+# -np 1: llama-server divides the context between its slots, so one slot keeps the whole window.
+args = ["-m", "{model}", "--host", "127.0.0.1", "--port", "{port}", "-c", "{context}", "-np", "1",
+        "--alias", "{model_id}", "-ngl", "999", "--jinja", "--no-webui"]
+ready_path = "/health"
+ready_timeout_s = 600
+
+[api]
+thinking = "chat_template_kwargs"
+
+[capabilities]
+tools = true
+json_schema = true
+vision = true
+anthropic_api = true
+
+[update]
+method = "brew"
+source = "llama.cpp"

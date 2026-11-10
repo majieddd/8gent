@@ -1,0 +1,48 @@
+# uzu (Mirai): a Rust + Metal engine. It runs Mirai's own model builds and folders converted with lalamo.
+# The server options --context-length and --sessions come from uzu Home's patched build.
+id = "uzu"
+name = "uzu"
+description = "Mirai's Metal engine for Apple Silicon. Fast decoding with a speculator; keeps several conversations in memory."
+homepage = "https://github.com/trymirai/uzu"
+kind = "managed"
+platforms = ["macos-arm64"]
+formats = ["uzu", "mirai"]
+
+[detect]
+paths = ["{data}/engines/uzu/uzu", "~/Library/Application Support/UzuHome/backend/engine/uzu"]
+version_file = "VERSION"
+
+[start]
+args = ["server", "--model", "{model}", "--host", "127.0.0.1", "--port", "{port}",
+        "--context-length", "{context}", "--sessions", "{sessions}"]
+ready_path = "/v1/models"
+ready_timeout_s = 900
+
+# uzu 0.6.7+ builds its matrix-unit kernels with Metal tensor ops that macOS 26.4 brought; before that
+# they fail to load, so the patched engine is told to use its SIMD kernels.
+[[start.env_when]]
+if = "macos<26.4"
+set = { UZU_DISABLE_MXU = "1" }
+
+[api]
+thinking = "enable_thinking"
+efforts = ["disabled", "default", "low", "medium", "high", "xhigh"]
+thinking_off = "disabled"
+role_normalize = true
+overflow_markers = ["context overflow", "context length"]
+
+[capabilities]
+tools = true
+json_schema = true
+sessions = 2
+reserves_context = true
+
+[[requires]]
+os = "macos"
+min = "26.4"
+since = "0.6.17"
+note = "On earlier macOS it only runs with the matrix units off, which reads prompts about 4x slower."
+
+[update]
+method = "github"
+source = "majieddd/uzuhome"

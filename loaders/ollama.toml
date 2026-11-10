@@ -1,0 +1,29 @@
+# Ollama: 8gent uses the server Ollama already runs and the models it has pulled.
+id = "ollama"
+name = "Ollama"
+description = "Models pulled with Ollama, through the server Ollama runs."
+homepage = "https://ollama.com"
+kind = "attach"
+formats = ["ollama"]
+
+[detect]
+command = "ollama"
+paths = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"]
+version_args = ["--version"]
+
+[attach]
+base_url = "http://127.0.0.1:11434/v1"
+
+[api]
+model_id = "{ref}"
+thinking = "reasoning_effort"
+thinking_off = "none"
+
+[capabilities]
+tools = true
+json_schema = true
+vision = true
+anthropic_api = true
+
+[update]
+method = "app"

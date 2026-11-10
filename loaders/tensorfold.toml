@@ -1,0 +1,44 @@
+# TensorFold: MLX models on Apple Silicon. The native engine (1.x) runs the models TensorFold has
+# qualified; the "tf06" variant is the 0.6.6 Python line, which runs any Qwen3.5 MLX build.
+id = "tensorfold"
+name = "TensorFold"
+description = "MLX models on Apple Silicon, with TensorFold's draft-and-verify speed-ups."
+homepage = "https://github.com/ashhart/TensorFold"
+kind = "managed"
+platforms = ["macos-arm64"]
+formats = ["mlx"]
+
+[detect]
+command = "tensorfold"
+paths = ["/opt/homebrew/bin/tensorfold"]
+version_args = ["--version"]
+
+[start]
+args = ["serve", "{model}", "--name", "{model_id}", "--host", "127.0.0.1", "--port", "{port}",
+        "--context", "{context}", "--no-update-check"]
+ready_path = "/v1/models"
+ready_timeout_s = 600
+
+[[start.when]]
+if = "thinking"
+args = ["--thinking"]
+
+[[start.when]]
+if = "!thinking"
+args = ["--no-thinking"]
+
+[variants.tf06]
+name = "TensorFold 0.6.6 (Python)"
+program = ["{data}/engines/tensorfold-0.6/venv/bin/python",
+           "~/Library/Application Support/TensorFoldLauncher/venv-tf06/bin/python"]
+# on macOS before 26.4 the 0.6 line needs its tensor units switched off; the script does that and starts it
+args_prefix = ["~/Library/Application Support/TensorFoldLauncher/bin/tf06_no_tensor_units.py"]
+
+[capabilities]
+tools = true
+json_schema = true
+anthropic_api = true
+
+[update]
+method = "brew"
+source = "tensorfold"

@@ -1,0 +1,29 @@
+# LM Studio: 8gent uses LM Studio's local server (Developer > Start server, or `lms server start`).
+id = "lmstudio"
+name = "LM Studio"
+description = "Models loaded in LM Studio, through its local server."
+homepage = "https://lmstudio.ai"
+kind = "attach"
+formats = ["lmstudio"]
+
+[detect]
+command = "lms"
+paths = ["~/.lmstudio/bin/lms"]
+version_args = ["version"]
+
+[attach]
+base_url = "http://127.0.0.1:1234/v1"
+
+[api]
+model_id = "{ref}"
+thinking = "reasoning_effort"
+thinking_off = "none"
+
+[capabilities]
+tools = true
+json_schema = true
+vision = true
+anthropic_api = true
+
+[update]
+method = "app"

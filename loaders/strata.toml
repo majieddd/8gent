@@ -1,0 +1,27 @@
+# Strata: Qwen3.8-Flash-Next and DeepSeek on consumer hardware. Strata's own app or `strata launch`
+# runs the server; 8gent uses its address.
+id = "strata"
+name = "Strata"
+description = "Strata's engine for very large models (experts streamed from the SSD when memory is short)."
+homepage = "https://github.com/Niko1221/Strata"
+kind = "attach"
+formats = ["strata"]
+
+[detect]
+command = "strata"
+paths = ["~/.strata/bin/strata", "/Applications/Strata.app/Contents/MacOS/Strata"]
+version_args = ["--version"]
+
+[attach]
+base_url = "http://127.0.0.1:8095/v1"
+
+[api]
+model_id = "{ref}"
+
+[capabilities]
+tools = true
+vision = true
+anthropic_api = true
+
+[update]
+method = "app"
