@@ -203,6 +203,8 @@ async fn json_response(ctx: &Shared, resp: reqwest::Response, rec: &mut RequestR
         rec.prompt_tokens = usage.get("prompt_tokens").or(usage.get("input_tokens")).and_then(|v| v.as_u64());
         rec.completion_tokens = usage.get("completion_tokens").or(usage.get("output_tokens")).and_then(|v| v.as_u64());
     }
+    // a whole answer arrives at once: the monitor counts its tokens in this second
+    ctx.app.live_tokens.fetch_add(rec.completion_tokens.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     // llama.cpp reports its own decode speed
     rec.tokens_per_second = doc.get("timings").and_then(|t| t.get("predicted_per_second")).and_then(|v| v.as_f64());
     rec.finish = if status.is_success() { "ok" } else { "error" }.into();
@@ -395,6 +397,7 @@ impl Shaper {
                 }
                 if payload.contains("\"delta\"") && (payload.contains("\"content\":\"") || payload.contains("\"content\": \"") || payload.contains("reasoning") || payload.contains("\"tool_calls\"")) {
                     self.pieces += 1;
+                    self.ctx.app.live_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.first.get_or_insert_with(Instant::now);
                 }
                 if self.rewrite {

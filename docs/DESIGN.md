@@ -136,7 +136,9 @@ for models whose folder names do not match; hiding embedding models from the cha
   each with `context_length`, `max_context_length` and `capabilities`. Agents read the window from
   here instead of assuming one.
 - **Thinking.** When a request does not choose, the selected mode is applied the way this engine
-  takes it. A request's own choice is kept. `reasoning_effort` names are mapped to ones the engine knows.
+  takes it. A request's own choice is kept: `enable_thinking: true|false` at the top level works
+  with every loader (8gent puts it where that engine reads it). `reasoning_effort` names are mapped
+  to ones the engine knows.
 - **Roles.** For loaders that need it, a history that resumes with the assistant gets a short user
   turn first.
 - **Prompts that do not fit.** Whatever the engine says (a 400, llama.cpp's own error type, uzu's
@@ -164,6 +166,8 @@ sending headers before the engine has answered at all; shared sampling defaults.
 | `POST /select` | `{loader?, model?, context?, thinking?, load?}`: change the selection |
 | `POST /engine/start`, `/engine/stop` | load or unload the selected model |
 | `GET /requests?limit=` | the latest requests, newest first |
+| `GET /monitor` | one sample a second for the last three minutes: tokens written, requests in progress, engine memory |
+| `GET /chats`, `GET`/`PUT`/`DELETE /chats/{id}` | the conversations held in 8gent's own Chat screen (files in `chats/` of the data folder) |
 | `GET /logs?loader=&lines=` | the engine's own output |
 | `POST /settings` | `{memory_mode?, idle_minutes?, auto_switch?}`, saved at once |
 | `POST /rescan` | look again for loaders and models; says which places have not answered yet |
@@ -259,13 +263,15 @@ mock-ups: the model-first screen, with a Home tab that shows what is serving now
 | Requests | built: the latest 200 with tokens, time to first token, speed and result |
 | Logs | built: each engine's own output, following the newest line |
 | Settings | built: memory mode and idle time, whether requests may switch models, theme, the endpoint address, stopping the service |
-| Chat, Monitor | planned (the Home apps had both) |
+| Chat | built, talking straight to the model: streamed answers with Markdown, tables and code blocks with Copy; the model's reasoning folded above its answer; tokens, speed and time to the first token under each answer; stop; attach a text file; thinking on or off; conversations saved and listed. Tools and previews: with the harness layer |
+| Monitor | built: tokens written per second and the memory the engine holds over the last two minutes, and what is happening now |
 | Race the loaders, profiles, loader install and update | planned |
 
-Checked by hand in a browser and as the built Mac app, against real engines: loading, switching
-from llama.cpp to TensorFold, and a switch to a model whose file is missing (the app showed
-llama.cpp's own reason and that 8gent went back to what was running). Not yet covered by automated
-tests; not yet built or run on Windows or Linux.
+Checked by hand in a browser and as the built Mac app, against real engines: every screen in both
+themes, loading, switching from llama.cpp to TensorFold, a switch to a model whose file is missing
+(the app showed llama.cpp's own reason and that 8gent went back to what was running), the settings,
+and a chat with and without thinking. Its logic has tests (`npm test`); its screens do not yet. The
+app has not been built or run on Windows or Linux.
 
 ## kr8
 
@@ -306,7 +312,7 @@ of this section is built.
 
 In the order agreed:
 
-1. Chat (direct to the model) and Monitor screens.
+1. ~~Chat (direct to the model) and Monitor screens.~~ Done.
 2. Daily setup on a Mac: start at login, the Home apps' old ports, Hermes pointed here, history
    import.
 3. Engine install and update, starting with the uzu and TensorFold paths the Home apps have.

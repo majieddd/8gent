@@ -75,6 +75,26 @@ pub fn apply_thinking(doc: &mut Value, api: &Api, thinking: bool) {
         return;
     }
     if explicit_thinking(&Value::Object(obj.clone())) {
+        // a client may always say `enable_thinking: true|false` at the top level; put it where this
+        // engine reads it
+        if let Some(Value::Bool(on)) = obj.get("enable_thinking").cloned() {
+            match api.thinking.as_str() {
+                "chat_template_kwargs" => {
+                    obj.remove("enable_thinking");
+                    let kwargs = obj.entry("chat_template_kwargs").or_insert_with(|| json!({}));
+                    if let Some(k) = kwargs.as_object_mut() {
+                        k.entry("enable_thinking").or_insert(Value::Bool(on));
+                    }
+                }
+                "reasoning_effort" => {
+                    obj.remove("enable_thinking");
+                    if !on {
+                        obj.insert("reasoning_effort".into(), Value::String(api.thinking_off.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
         return;
     }
     match api.thinking.as_str() {
@@ -234,6 +254,14 @@ mod tests {
         let mut doc = json!({"enable_thinking": true});
         apply_thinking(&mut doc, &api("enable_thinking"), false);
         assert_eq!(doc["enable_thinking"], true);
+
+        // the top-level switch is moved to where each engine reads it
+        let mut doc = json!({"enable_thinking": true});
+        apply_thinking(&mut doc, &api("chat_template_kwargs"), false);
+        assert_eq!((doc.get("enable_thinking"), &doc["chat_template_kwargs"]["enable_thinking"]), (None, &json!(true)));
+        let mut doc = json!({"enable_thinking": false});
+        apply_thinking(&mut doc, &Api { thinking: "reasoning_effort".into(), thinking_off: "none".into(), ..Default::default() }, true);
+        assert_eq!((doc.get("enable_thinking"), &doc["reasoning_effort"]), (None, &json!("none")));
 
         let mut doc = json!({"messages": []});
         apply_thinking(&mut doc, &Api { thinking: "reasoning_effort".into(), thinking_off: "none".into(), ..Default::default() }, false);

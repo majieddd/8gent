@@ -30,10 +30,65 @@ async fn api(client: tauri::State<'_, reqwest::Client>, method: String, path: St
     let request = match method.as_str() {
         "GET" => client.get(url),
         "POST" => client.post(url).header("content-type", "application/json").body(body.unwrap_or_else(|| "{}".into())),
+        "PUT" => client.put(url).header("content-type", "application/json").body(body.unwrap_or_else(|| "{}".into())),
+        "DELETE" => client.delete(url),
         other => return Err(format!("{other} is not used by the control API")),
     };
     let response = request.send().await.map_err(|e| e.to_string())?;
     Ok(ApiResponse { status: response.status().as_u16(), body: response.text().await.map_err(|e| e.to_string())? })
+}
+
+/// Chats in progress, by the id the page gave them, so the page can stop one.
+#[derive(Default)]
+struct Streams(std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Notify>>>);
+
+/// One streamed chat request to the endpoint. The answer's text is handed to the page piece by
+/// piece as it arrives; the result is the HTTP status. Stopping drops the connection, which the
+/// service records as cancelled and the engine stops writing.
+#[tauri::command]
+async fn chat_stream(client: tauri::State<'_, reqwest::Client>, streams: tauri::State<'_, Streams>, id: String, body: String, on_chunk: tauri::ipc::Channel<String>) -> Result<u16, String> {
+    use futures_util::StreamExt;
+    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    streams.0.lock().unwrap().insert(id.clone(), stop.clone());
+    let run = async {
+        let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", port())).header("content-type", "application/json").body(body).send().await.map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        let mut stream = response.bytes_stream();
+        // a piece can end in the middle of a character: keep the unfinished bytes for the next one
+        let mut carry: Vec<u8> = Vec::new();
+        loop {
+            tokio::select! {
+                _ = stop.notified() => break,
+                piece = stream.next() => match piece {
+                    Some(Ok(bytes)) => {
+                        carry.extend_from_slice(&bytes);
+                        let whole = match std::str::from_utf8(&carry) {
+                            Ok(_) => carry.len(),
+                            Err(e) => e.valid_up_to(),
+                        };
+                        if whole > 0 {
+                            let text = String::from_utf8_lossy(&carry[..whole]).into_owned();
+                            carry.drain(..whole);
+                            on_chunk.send(text).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    Some(Err(e)) => return Err(e.to_string()),
+                    None => break,
+                },
+            }
+        }
+        Ok(status)
+    };
+    let result = run.await;
+    streams.0.lock().unwrap().remove(&id);
+    result
+}
+
+#[tauri::command]
+fn chat_cancel(streams: tauri::State<'_, Streams>, id: String) {
+    if let Some(stop) = streams.0.lock().unwrap().get(&id) {
+        stop.notify_waiters();
+    }
 }
 
 async fn answering(client: &reqwest::Client) -> bool {
@@ -90,6 +145,7 @@ fn main() {
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build().expect("http client");
     tauri::Builder::default()
         .manage(client.clone())
+        .manage(Streams::default())
         .setup(move |app| {
             // opening the window is enough: start the service if it is not there yet
             let handle = app.handle().clone();
@@ -100,7 +156,7 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![api, start_service])
+        .invoke_handler(tauri::generate_handler![api, start_service, chat_stream, chat_cancel])
         .run(tauri::generate_context!())
         .expect("the 8gent window could not start");
 }

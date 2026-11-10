@@ -385,7 +385,27 @@ async fn stop_and_start_and_the_lists() {
     assert_eq!(s.post("/8gent/v1/settings", json!({"memory_mode": "sometimes"})).await.0, 400);
     assert_eq!(s.status().await["selection"]["loader"], "mocka", "settings leave the selection alone");
 
+    // the Chat screen's conversations: saved, listed newest first, read back, removed
+    let put = |id: &str, body: Value| { let (http, url) = (s.http.clone(), format!("{}/8gent/v1/chats/{id}", s.base)); async move { http.put(url).json(&body).send().await.unwrap().status().as_u16() } };
+    assert_eq!(put("first-chat", json!({"title": "About the sea", "messages": [{"role": "user", "content": "hi"}]})).await, 200);
+    assert_eq!(put("second-chat", json!({"messages": []})).await, 200);
+    // an id cannot leave the chats folder: a slash (sent encoded) or a dot is refused
+    assert_eq!(put("..%2F..%2Fconfig", json!({"messages": []})).await, 400);
+    assert_eq!(put("bad.id", json!({"messages": []})).await, 400);
+    assert_eq!(put("no-messages", json!({"title": "x"})).await, 400);
+    let listed = s.get("/8gent/v1/chats").await.1;
+    assert_eq!(listed["chats"].as_array().unwrap().len(), 2, "{listed}");
+    let one = s.get("/8gent/v1/chats/first-chat").await.1;
+    assert_eq!((one["title"].as_str(), one["messages"][0]["content"].as_str()), (Some("About the sea"), Some("hi")));
+    assert_eq!(s.http.delete(format!("{}/8gent/v1/chats/first-chat", s.base)).send().await.unwrap().status().as_u16(), 200);
+    assert_eq!(s.get("/8gent/v1/chats/first-chat").await.0, 404);
+
     s.chat("8gent", "hi").await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let mon = s.get("/8gent/v1/monitor").await.1;
+    let samples = mon["samples"].as_array().unwrap();
+    assert!(!samples.is_empty() && samples.iter().any(|x| x["tokens_per_second"].as_f64().unwrap_or(0.0) > 0.0), "the answer's tokens show in the monitor: {mon}");
+    assert_eq!(samples.last().unwrap()["state"], "ready");
     let recent = s.get("/8gent/v1/requests?limit=5").await.1;
     assert_eq!((recent["requests"].as_array().unwrap().len(), recent["requests"][0]["finish"].as_str()), (1, Some("ok")), "{recent}");
     let logs = s.get("/8gent/v1/logs?loader=mocka&lines=20").await.1;

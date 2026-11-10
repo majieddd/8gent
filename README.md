@@ -72,8 +72,8 @@ at once:** each keeps its own copy in memory.
 
 In [app/](app/): Tauri with React and Tailwind, in kr8's look. Home shows what is serving; Models
 shows, for the model you pick, every loader that can run it with its measured speed and the memory
-it needs at the context window you choose, and switches with one press. Loaders, Requests, Logs and
-Settings are there too. It needs Node (built with 22) and Rust.
+it needs at the context window you choose, and switches with one press. Chat talks to the loaded
+model; Monitor, Loaders, Requests, Logs and Settings are there too. It needs Node (built with 22) and Rust.
 
 ```bash
 cargo build --release

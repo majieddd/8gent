@@ -69,10 +69,24 @@ pub struct App {
     also_loaded: RwLock<Vec<String>>,
     /// Told to stop through the control API.
     pub quit: tokio::sync::Notify,
+    /// Pieces of answers written since the service started; the monitor reads its rate.
+    pub live_tokens: AtomicU64,
+    /// One sample a second for the Monitor screen, the last three minutes.
+    monitor: std::sync::Mutex<std::collections::VecDeque<Sample>>,
     last_activity: AtomicU64,
     started: Instant,
     import_external: bool,
     housekeeping_every: Duration,
+}
+
+/// What the service was doing during one second.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Sample {
+    pub at: u64,
+    pub tokens_per_second: f64,
+    pub in_flight: u64,
+    pub memory_bytes: Option<u64>,
+    pub state: EngineState,
 }
 
 pub struct ApiErr {
@@ -141,6 +155,8 @@ impl App {
             total_memory: host::total_memory(),
             also_loaded: RwLock::new(vec![]),
             quit: tokio::sync::Notify::new(),
+            live_tokens: AtomicU64::new(0),
+            monitor: std::sync::Mutex::new(std::collections::VecDeque::new()),
             last_activity: AtomicU64::new(now()),
             started: Instant::now(),
             import_external: opts.import_external,
@@ -391,6 +407,27 @@ impl App {
         g.save(&self.paths).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None))
     }
 
+    /// Once a second: how fast answers are being written, how many requests are in progress, and
+    /// the memory the engine holds. Cheap: two counters and one system call.
+    pub async fn sampler(self: Arc<Self>) {
+        let mut last = self.live_tokens.load(Ordering::Relaxed);
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let total = self.live_tokens.load(Ordering::Relaxed);
+            let state = self.engine.state();
+            let pid = self.engine.current().and_then(|r| r.pid);
+            let sample = Sample { at: now(), tokens_per_second: total.saturating_sub(last) as f64, in_flight: self.stats.in_flight(), memory_bytes: pid.and_then(engine::process_memory), state };
+            last = total;
+            let mut g = self.monitor.lock().unwrap();
+            g.push_back(sample);
+            while g.len() > 180 {
+                g.pop_front();
+            }
+        }
+    }
+
     /// Every few seconds: notice an engine that died, unload an idle one, refresh attached servers.
     pub async fn housekeeping(self: Arc<Self>) {
         let mut last_refresh = Instant::now();
@@ -575,6 +612,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/8gent/v1/models", get(library_models))
         .route("/8gent/v1/logs", get(logs))
         .route("/8gent/v1/requests", get(requests))
+        .route("/8gent/v1/monitor", get(monitor))
+        .route("/8gent/v1/chats", get(chats))
+        .route("/8gent/v1/chats/{id}", get(chat_get).put(chat_put).delete(chat_delete))
         .route("/8gent/v1/settings", post(settings))
         .route("/8gent/v1/select", post(select))
         .route("/8gent/v1/engine/start", post(engine_start))
@@ -648,6 +688,72 @@ async fn requests(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, h
     authorize(&app, &remote, &headers, true)?;
     let limit: usize = q.get("limit").and_then(|n| n.parse().ok()).unwrap_or(100).min(200);
     Ok(Json(json!({"requests": app.stats.recent(limit)})))
+}
+
+async fn monitor(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let samples: Vec<Sample> = app.monitor.lock().unwrap().iter().cloned().collect();
+    Ok(Json(json!({"samples": samples, "gpu_budget_bytes": host::gpu_budget(app.total_memory), "total_bytes": app.total_memory})))
+}
+
+// --------------------------------------------------------------------------------------------- chats
+// Conversations held in 8gent's own Chat screen, one JSON file each in <home>/chats. Requests that
+// other programs send to the endpoint are never stored here.
+
+fn chat_file(app: &App, id: &str) -> Result<std::path::PathBuf, ApiErr> {
+    let ok = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !ok {
+        return Err(ApiErr::bad_request("A chat's id is letters, digits and dashes."));
+    }
+    Ok(app.paths.home.join("chats").join(format!("{id}.json")))
+}
+
+async fn chats(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let mut rows: Vec<Value> = std::fs::read_dir(app.paths.home.join("chats"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let doc: Value = serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()?;
+            Some(json!({"id": doc.get("id")?, "title": doc.get("title")?, "updated_at": doc.get("updated_at")?, "messages": doc.get("messages")?.as_array()?.len()}))
+        })
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r["updated_at"].as_u64().unwrap_or(0)));
+    Ok(Json(json!({"chats": rows})))
+}
+
+async fn chat_get(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let text = std::fs::read_to_string(chat_file(&app, &id)?).map_err(|_| ApiErr::new(StatusCode::NOT_FOUND, "There is no such chat.", "invalid_request_error", Some("not_found")))?;
+    serde_json::from_str(&text).map(Json).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), "server_error", None))
+}
+
+async fn chat_put(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(mut body): Json<Value>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let file = chat_file(&app, &id)?;
+    if !body.get("messages").is_some_and(|m| m.is_array()) {
+        return Err(ApiErr::bad_request("A chat needs its messages."));
+    }
+    body["id"] = json!(id);
+    body["updated_at"] = json!(now());
+    if !body.get("title").is_some_and(|t| t.is_string()) {
+        body["title"] = json!("New chat");
+    }
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(file.parent().unwrap())?;
+        let tmp = file.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&body).unwrap_or_default())?;
+        std::fs::rename(&tmp, &file)
+    };
+    write().map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), "server_error", None))?;
+    Ok(Json(json!({"ok": true, "id": id, "updated_at": body["updated_at"]})))
+}
+
+async fn chat_delete(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let _ = std::fs::remove_file(chat_file(&app, &id)?);
+    Ok(Json(json!({"ok": true})))
 }
 
 /// Change how the service behaves: `{memory_mode?, idle_minutes?, auto_switch?}`. Saved at once.
@@ -753,6 +859,7 @@ async fn forward(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, me
 /// Run the service on `listener` until `shutdown` resolves, then stop the engine.
 pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), String> {
     tokio::spawn(app.clone().housekeeping());
+    tokio::spawn(app.clone().sampler());
     if !app.scan_begun.load(Ordering::Relaxed) {
         let looking = app.clone();
         tokio::spawn(async move { looking.rescan().await });

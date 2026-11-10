@@ -1,22 +1,26 @@
-import { Boxes, Check, Copy, Cpu, Home as HomeIcon, List, ScrollText, SlidersHorizontal } from "lucide-react";
+import { Activity, Boxes, Check, Copy, Cpu, Home as HomeIcon, List, MessageSquare, ScrollText, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button, cx, Mark8, State } from "./components/ui";
 import { api, inTauri, Status } from "./lib/api";
 import { Service, useService } from "./lib/useService";
+import { Chat } from "./pages/Chat";
 import { Home } from "./pages/Home";
 import { Loaders } from "./pages/Loaders";
 import { Logs } from "./pages/Logs";
 import { Models } from "./pages/Models";
+import { Monitor } from "./pages/Monitor";
 import { Requests } from "./pages/Requests";
 import { Settings } from "./pages/Settings";
 
-export type Tab = "home" | "models" | "loaders" | "requests" | "logs" | "settings";
+export type Tab = "home" | "chat" | "models" | "loaders" | "monitor" | "requests" | "logs" | "settings";
 export type Theme = "system" | "light" | "dark";
 
 const TABS: { id: Tab; label: string; icon: typeof HomeIcon }[] = [
   { id: "home", label: "Home", icon: HomeIcon },
+  { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "models", label: "Models", icon: Boxes },
   { id: "loaders", label: "Loaders", icon: Cpu },
+  { id: "monitor", label: "Monitor", icon: Activity },
   { id: "requests", label: "Requests", icon: List },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "settings", label: "Settings", icon: SlidersHorizontal },
@@ -156,11 +160,16 @@ export function App() {
       <main className="min-w-0 flex-1 overflow-y-auto">
         {svc.down || !status ? (
           svc.down ? <ServiceDown onStarted={svc.refresh} /> : null
+        ) : tab === "chat" ? (
+          <div className="mx-auto flex h-full max-w-[1180px] flex-col px-8 pb-6 pt-7">
+            <Chat svc={svc} status={status} modelName={modelName} loaderName={loaderName} openModels={() => openModels()} />
+          </div>
         ) : (
           <div className="mx-auto flex max-w-[1180px] flex-col gap-6 px-8 pb-10 pt-7">
             {tab === "home" && <Home svc={svc} status={status} modelName={modelName} loaderName={loaderName} openModels={openModels} openRequests={() => setTab("requests")} />}
             {tab === "models" && <Models svc={svc} status={status} picked={picked} setPicked={setPicked} />}
             {tab === "loaders" && <Loaders svc={svc} />}
+            {tab === "monitor" && <Monitor status={status} modelName={modelName} loaderName={loaderName} />}
             {tab === "requests" && <Requests modelName={modelName} loaderName={loaderName} />}
             {tab === "logs" && <Logs svc={svc} status={status} />}
             {tab === "settings" && <Settings svc={svc} status={status} theme={theme} setTheme={setTheme} endpoint={endpoint} />}

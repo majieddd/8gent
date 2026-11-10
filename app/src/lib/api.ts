@@ -1,6 +1,6 @@
 // The app's one way to the service: its control API under /8gent/v1. Inside the Tauri window calls go
 // through the app's `api` command; in a plain browser (npm run dev) through Vite's proxy.
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -17,7 +17,7 @@ export class ApiError extends Error {
 /** The service is not answering at all (as opposed to answering with an error). */
 export class Unreachable extends Error {}
 
-async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function call<T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
   let status: number;
   let text: string;
   try {
@@ -82,7 +82,95 @@ export interface Loader {
   variants: string[]; update: { method: string; source: string }; models: string[]; selected: boolean;
 }
 
+export interface Sample { at: number; tokens_per_second: number; in_flight: number; memory_bytes: number | null; state: Status["engine"]["state"] }
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  /** The model's reasoning, shown folded away above its answer. */
+  thinking?: string;
+  thinking_ms?: number;
+  tokens?: number;
+  tokens_per_second?: number;
+  first_token_ms?: number;
+  /** What answered: "OxCoder-9B on uzu". */
+  by?: string;
+  error?: string;
+  stopped?: boolean;
+}
+export interface ChatDoc { id: string; title: string; updated_at?: number; messages: ChatMessage[] }
+export interface ChatRow { id: string; title: string; updated_at: number; messages: number }
+
+/**
+ * One streamed chat request to the endpoint. `onEvent` gets each event of the stream as it arrives.
+ * Aborting `signal` stops the answer. A refusal (a prompt that does not fit, no model selected)
+ * rejects with the service's own message.
+ */
+export async function streamChat(body: object, onEvent: (event: any) => void, signal: AbortSignal): Promise<void> {
+  let pending = "";
+  let raw = "";
+  const push = (text: string) => {
+    raw = raw.length < 20000 ? raw + text : raw;
+    pending += text;
+    let nl: number;
+    while ((nl = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, nl).replace(/\r$/, "");
+      pending = pending.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload && payload !== "[DONE]") {
+        try {
+          onEvent(JSON.parse(payload));
+        } catch {
+          // a line that is not JSON carries nothing for the chat
+        }
+      }
+    }
+  };
+  let status: number;
+  try {
+    if (inTauri) {
+      const id = crypto.randomUUID();
+      const channel = new Channel<string>();
+      channel.onmessage = push;
+      const stop = () => void invoke("chat_cancel", { id });
+      signal.addEventListener("abort", stop);
+      try {
+        status = await invoke<number>("chat_stream", { id, body: JSON.stringify(body), onChunk: channel });
+      } finally {
+        signal.removeEventListener("abort", stop);
+      }
+    } else {
+      const r = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+      status = r.status;
+      const reader = r.body!.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        push(decoder.decode(value, { stream: true }));
+      }
+    }
+  } catch (e) {
+    if (signal.aborted) return;
+    throw new Unreachable(String(e));
+  }
+  if (status >= 400) {
+    let json: any = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      // the message below stands in
+    }
+    throw new ApiError(json?.error?.message ?? `The service answered ${status}.`, status, json);
+  }
+}
+
 export const api = {
+  monitor: () => call<{ samples: Sample[]; gpu_budget_bytes: number | null; total_bytes: number | null }>("GET", "/8gent/v1/monitor"),
+  chats: () => call<{ chats: ChatRow[] }>("GET", "/8gent/v1/chats"),
+  chat: (id: string) => call<ChatDoc>("GET", `/8gent/v1/chats/${id}`),
+  saveChat: (doc: ChatDoc) => call<{ ok: boolean }>("PUT", `/8gent/v1/chats/${doc.id}`, doc),
+  deleteChat: (id: string) => call<{ ok: boolean }>("DELETE", `/8gent/v1/chats/${id}`),
   status: () => call<Status>("GET", "/8gent/v1/status"),
   models: () => call<{ models: Model[] }>("GET", "/8gent/v1/models"),
   loaders: () => call<{ loaders: Loader[] }>("GET", "/8gent/v1/loaders"),

@@ -776,6 +776,7 @@ name = "eightgent-app"
 version = "0.1.0"
 dependencies = [
  "eightgent",
+ "futures-util",
  "reqwest 0.12.28",
  "serde",
  "tauri",
