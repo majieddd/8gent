@@ -121,6 +121,50 @@ fn release_asset(repo: &str, name: &str) -> Result<Option<(String, String)>, Str
     Ok(None)
 }
 
+/// One file of a release: its name, download address and the SHA-256 GitHub publishes for it.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReleaseFile {
+    pub name: String,
+    pub url: String,
+    pub sha256: Option<String>,
+}
+
+/// The newest published release of a repository: its version (the tag without a leading "v"), its
+/// page, and its files.
+pub fn latest_release(repo: &str) -> Result<(String, String, Vec<ReleaseFile>), String> {
+    let r = curl_json(&format!("https://api.github.com/repos/{repo}/releases/latest"))?;
+    let tag = r.get("tag_name").and_then(|t| t.as_str()).ok_or_else(|| format!("{repo} has no published release"))?;
+    let page = r.get("html_url").and_then(|u| u.as_str()).unwrap_or_default().to_string();
+    let files = r
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|a| {
+            Some(ReleaseFile {
+                name: a.get("name")?.as_str()?.to_string(),
+                url: a.get("browser_download_url")?.as_str()?.to_string(),
+                sha256: a.get("digest").and_then(|d| d.as_str()).and_then(|d| d.strip_prefix("sha256:")).map(String::from),
+            })
+        })
+        .collect();
+    Ok((tag.trim_start_matches('v').to_string(), page, files))
+}
+
+/// Download a release file and check it against its published SHA-256. Without a published hash, or
+/// with a different one, nothing is kept.
+pub fn download_verified(file: &ReleaseFile, dest: &Path) -> Result<(), String> {
+    let sha = file.sha256.as_deref().ok_or_else(|| format!("GitHub publishes no SHA-256 for {}, so the download cannot be checked.", file.name))?;
+    let curl = tool("curl", &["/usr/bin/curl"]).ok_or("curl was not found")?;
+    run(&curl, &["-fsSL", "--retry", "3", "--max-time", "1800", "-o", &dest.to_string_lossy(), &file.url], Duration::from_secs(1900))?;
+    let got = sha256_file(dest)?;
+    if got != sha.to_lowercase() {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!("The download's SHA-256 is {got}; GitHub publishes {sha}. Nothing was installed."));
+    }
+    Ok(())
+}
+
 fn asset_name(m: &Manifest, version: &str) -> String {
     m.update.asset.replace("{version}", version).replace("{platform}", platform())
 }

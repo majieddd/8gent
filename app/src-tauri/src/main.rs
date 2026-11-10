@@ -156,6 +156,116 @@ async fn start_service(app: tauri::AppHandle, client: tauri::State<'_, reqwest::
     start(&app, &client).await
 }
 
+/// Where 8gent's own releases are.
+const REPO: &str = "majieddd/8gent";
+
+#[derive(serde::Serialize)]
+struct AppUpdate {
+    current: String,
+    latest: String,
+    available: bool,
+    /// This build can install it by itself (macOS); elsewhere the release page has the installer.
+    can_install: bool,
+    page: String,
+}
+
+fn app_file(version: &str) -> String {
+    format!("8gent-{version}-{}.app.zip", eightgent::manifest::platform())
+}
+
+/// Is there a newer 8gent than this one?
+#[tauri::command]
+async fn app_update_check(app: tauri::AppHandle) -> Result<AppUpdate, String> {
+    let current = app.package_info().version.to_string();
+    let (latest, page, files) = tauri::async_runtime::spawn_blocking(|| eightgent::updates::latest_release(REPO)).await.map_err(|e| e.to_string())??;
+    let available = eightgent::manifest::compare_versions(&latest, &current) == std::cmp::Ordering::Greater;
+    let can_install = cfg!(target_os = "macos") && files.iter().any(|f| f.name == app_file(&latest) && f.sha256.is_some());
+    Ok(AppUpdate { current, latest, available, can_install, page })
+}
+
+/// Download the newest 8gent, check it, and put it in place of this one: this app quits, a helper
+/// keeps a copy of the version that was here, swaps the new one in, restarts the service on it and
+/// opens the app again.
+#[tauri::command]
+async fn app_update_install(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("On this system, install the new version from the release page.".to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use eightgent::updates;
+        let current_version = app.package_info().version.to_string();
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|x| x == "app")).ok_or("This copy of 8gent is not inside an app bundle, so it cannot replace itself.")?.to_path_buf();
+        let paths = Paths::from_env();
+        let stage = paths.home.join("updates").join("staged");
+        let (version, staged) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, PathBuf), String> {
+            let (latest, _, files) = updates::latest_release(REPO)?;
+            if eightgent::manifest::compare_versions(&latest, &current_version) != std::cmp::Ordering::Greater {
+                return Err(format!("8gent {current_version} is the newest version."));
+            }
+            let file = files.iter().find(|f| f.name == app_file(&latest)).ok_or_else(|| format!("Release {latest} has no build for this kind of Mac."))?;
+            let _ = std::fs::remove_dir_all(&stage);
+            std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+            let zip = stage.join(&file.name);
+            updates::download_verified(file, &zip)?;
+            updates::run(std::path::Path::new("/usr/bin/ditto"), &["-x", "-k", &zip.to_string_lossy(), &stage.to_string_lossy()], Duration::from_secs(300))?;
+            let fresh = stage.join("8gent.app");
+            // it must be 8gent, and the version the release says it is
+            let plist = fresh.join("Contents/Info.plist");
+            let read = |key: &str| updates::run(std::path::Path::new("/usr/bin/plutil"), &["-extract", key, "raw", &plist.to_string_lossy()], Duration::from_secs(10)).map(|s| s.trim().to_string());
+            if read("CFBundleIdentifier")? != "app.kr8.eightgent" {
+                return Err("The download is not 8gent. Nothing was installed.".into());
+            }
+            let got = read("CFBundleShortVersionString")?;
+            if got != latest {
+                return Err(format!("The download says it is {got}; the release says {latest}. Nothing was installed."));
+            }
+            Ok((latest, fresh))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        let backup = paths.home.join("updates").join(format!("app-before-{}", app.package_info().version));
+        let q = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+        let script = format!(
+            r#"while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
+/usr/bin/curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{{}}' http://127.0.0.1:{port}/8gent/v1/shutdown >/dev/null 2>&1
+sleep 2
+rm -rf {backup}; mkdir -p {backup}
+/usr/bin/ditto {bundle} {backup}/8gent.app || exit 1
+rm -rf {bundle} && /usr/bin/ditto {staged} {bundle} || {{ /usr/bin/ditto {backup}/8gent.app {bundle}; }}
+/usr/bin/xattr -dr com.apple.quarantine {bundle} 2>/dev/null
+rm -rf {stage}
+[ -f "$HOME/Library/LaunchAgents/{label}.plist" ] && /bin/launchctl kickstart "gui/$(id -u)/{label}" >/dev/null 2>&1
+/usr/bin/open {bundle}
+"#,
+            pid = std::process::id(),
+            port = port(),
+            backup = q(&backup),
+            bundle = q(&bundle),
+            staged = q(&staged),
+            stage = q(staged.parent().unwrap()),
+            label = eightgent::service::LABEL,
+        );
+        let mut helper = std::process::Command::new("/bin/bash");
+        helper.args(["-c", &script]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        {
+            use std::os::unix::process::CommandExt;
+            helper.process_group(0);
+        }
+        helper.spawn().map_err(|e| e.to_string())?;
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            handle.exit(0);
+        });
+        Ok(version)
+    }
+}
+
 fn main() {
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build().expect("http client");
     tauri::Builder::default()
@@ -171,7 +281,7 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![api, start_service, chat_stream, chat_cancel])
+        .invoke_handler(tauri::generate_handler![api, start_service, chat_stream, chat_cancel, app_update_check, app_update_install])
         .run(tauri::generate_context!())
         .expect("the 8gent window could not start");
 }

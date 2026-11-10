@@ -2,7 +2,7 @@ import { useState } from "react";
 import { CopyButton, Theme } from "../App";
 import { gb } from "../lib/format";
 import { Button, Card, cx, Label, Notice, PageTitle, Segmented } from "../components/ui";
-import { api, ApiError, Status } from "../lib/api";
+import { api, ApiError, appUpdate, AppUpdate, inTauri, Status } from "../lib/api";
 import { Service } from "../lib/useService";
 
 function Row({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
@@ -58,6 +58,29 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
     }
     await svc.refresh();
     setSettingSmall(false);
+  };
+
+  const [update, setUpdate] = useState<AppUpdate | null>(null);
+  const [updating, setUpdating] = useState("");
+  const lookForUpdate = async () => {
+    setUpdating("looking");
+    setError("");
+    try {
+      setUpdate(await appUpdate.check());
+    } catch (e) {
+      setError(typeof e === "string" ? e : e instanceof Error ? e.message : "The check did not work.");
+    }
+    setUpdating("");
+  };
+  const installUpdate = async () => {
+    setUpdating("installing");
+    setError("");
+    try {
+      await appUpdate.install(); // the app quits and reopens as the new version
+    } catch (e) {
+      setError(typeof e === "string" ? e : e instanceof Error ? e.message : "The update did not work.");
+      setUpdating("");
+    }
   };
 
   const stopService = async () => {
@@ -157,6 +180,18 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
           <Row title={`8gent ${status.version}`} hint={`Running on ${status.platform} ${status.os_version}. It keeps the endpoint up when this window is closed.`}>
             <Button onClick={stopService} disabled={stopping}>{stopping ? "Stopping" : "Stop the service"}</Button>
           </Row>
+          {inTauri && (
+            <Row
+              title={update?.available ? `8gent ${update.latest} is available` : update ? "This is the newest version" : "Updates"}
+              hint={update?.available ? (update.can_install ? "The download is checked against the SHA-256 GitHub publishes for it. 8gent closes, puts the new version in, and opens again; the version you have is kept as a recovery copy." : `Get it from ${update.page}`) : "New versions of 8gent itself, from its releases on GitHub."}
+            >
+              {update?.available && update.can_install ? (
+                <Button variant="primary" onClick={installUpdate} disabled={updating !== ""}>{updating === "installing" ? "Downloading" : `Update to ${update.latest}`}</Button>
+              ) : (
+                <Button onClick={lookForUpdate} disabled={updating !== ""}>{updating === "looking" ? "Looking" : "Look for a new version"}</Button>
+              )}
+            </Row>
+          )}
           <Row title="Start at login" hint="The endpoint is there as soon as you log in, without opening this window.">
             <Switch
               on={status.login_item}

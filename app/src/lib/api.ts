@@ -175,6 +175,14 @@ export interface UpdateState {
   note: string; checked_at: number | null; busy: boolean; last_result: string | null;
 }
 
+export interface AppUpdate { current: string; latest: string; available: boolean; can_install: boolean; page: string }
+
+/** The app's own updates: only the window can replace itself, so these exist inside it alone. */
+export const appUpdate = {
+  check: () => (inTauri ? invoke<AppUpdate>("app_update_check") : Promise.reject(new Error("Only the app can update itself."))),
+  install: () => invoke<string>("app_update_install"),
+};
+
 export const api = {
   updates: () => call<{ updates: UpdateState[]; auto_update: boolean }>("GET", "/8gent/v1/updates"),
   checkUpdates: () => call<{ updates: UpdateState[]; auto_update: boolean }>("POST", "/8gent/v1/updates/check", {}),

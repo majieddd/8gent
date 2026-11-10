@@ -53,8 +53,8 @@ name = "Alpha"
 format = "mock"
 ref = "alpha-weights"
 max_context = 131072
-size_bytes = 5000000000
-kv_bytes_per_token = 32768
+size_bytes = 50000000
+kv_bytes_per_token = 1024
 
 [[model]]
 id = "beta"
@@ -453,9 +453,9 @@ async fn stop_and_start_and_the_lists() {
     let alpha = models["models"].as_array().unwrap().iter().find(|m| m["id"] == "alpha").cloned().unwrap();
     let on_a = alpha["loaders"].as_array().unwrap().iter().find(|l| l["id"] == "mocka").cloned().unwrap();
     assert_eq!(on_a["runnable"], true);
-    // weights 5 GB + 1.1 GB runtime + 32 KB a token over 65,536 tokens
-    assert_eq!(on_a["estimated_memory_bytes"].as_u64(), Some(5_000_000_000 + 1_100_000_000 + 32768 * 65536));
-    assert_eq!((on_a["base_bytes"].as_u64(), on_a["kv_bytes_per_token"].as_u64(), on_a["context"].as_u64()), (Some(6_100_000_000), Some(32768), Some(65536)));
+    // weights 50 MB + 1.1 GB runtime + 1 KB a token over 65,536 tokens (small enough for any test machine)
+    assert_eq!(on_a["estimated_memory_bytes"].as_u64(), Some(50_000_000 + 1_100_000_000 + 1024 * 65536));
+    assert_eq!((on_a["base_bytes"].as_u64(), on_a["kv_bytes_per_token"].as_u64(), on_a["context"].as_u64()), (Some(1_150_000_000), Some(1024), Some(65536)));
     assert_eq!((on_a["selected"].as_bool(), on_a["serving"].as_bool()), (Some(true), Some(false)));
 
     // settings are saved and answered back; nonsense is refused
