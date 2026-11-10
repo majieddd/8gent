@@ -15,6 +15,7 @@ version_file = "VERSION"
 [start]
 args = ["server", "--model", "{model}", "--host", "127.0.0.1", "--port", "{port}",
         "--context-length", "{context}", "--sessions", "{sessions}"]
+prewarm = ["{model}/model.safetensors", "{model}/speculator/model.safetensors"]
 ready_path = "/v1/models"
 ready_timeout_s = 900
 

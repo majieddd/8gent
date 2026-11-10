@@ -26,6 +26,9 @@ pub struct Config {
     pub port: u16,
     /// Listen on every network interface, not only this computer.
     pub share: bool,
+    /// Other ports the endpoint answers on as well: the addresses of the Home apps it replaced, so
+    /// whatever was pointed at them keeps working.
+    pub also_listen: Vec<u16>,
     /// When set, requests from other computers must carry it as a bearer token.
     pub api_key: Option<String>,
     /// The model name that always means "whatever is selected".
@@ -47,6 +50,7 @@ impl Default for Config {
         Self {
             port: DEFAULT_PORT,
             share: false,
+            also_listen: vec![],
             api_key: None,
             served_name: "8gent".into(),
             memory_mode: MemoryMode::Idle,

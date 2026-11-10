@@ -78,6 +78,11 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
             <span className="font-mono text-[13px]">{endpoint}</span>
             <CopyButton text={endpoint} label="Copy the endpoint address" className="text-muted" />
           </Row>
+          {status.also_listening.length > 0 && (
+            <Row title="Also answering on" hint="The addresses of the Home apps 8gent replaced, so whatever was pointed at them keeps working.">
+              <span className="font-mono text-[13px]">{status.also_listening.map((p) => `:${p}`).join("  ")}</span>
+            </Row>
+          )}
           <Row title="Requests can switch models" hint="A request that names another model, or loader/model, switches to it. Off: such a request is refused.">
             <Switch on={status.auto_switch} onChange={(auto_switch) => save({ auto_switch })} label="Requests can switch models" />
           </Row>
@@ -98,6 +103,23 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
         <Card className="divide-y divide-line">
           <Row title={`8gent ${status.version}`} hint={`Running on ${status.platform} ${status.os_version}. It keeps the endpoint up when this window is closed.`}>
             <Button onClick={stopService} disabled={stopping}>{stopping ? "Stopping" : "Stop the service"}</Button>
+          </Row>
+          <Row title="Start at login" hint="The endpoint is there as soon as you log in, without opening this window.">
+            <Switch
+              on={status.login_item}
+              label="Start at login"
+              onChange={async (enabled) => {
+                setError("");
+                try {
+                  await api.loginItem(enabled);
+                } catch (e) {
+                  setError(e instanceof ApiError ? e.message : "The service did not answer.");
+                }
+                // switching it on restarts the service under the login agent: give it a moment
+                setTimeout(svc.refresh, 4500);
+                await svc.refresh();
+              }}
+            />
           </Row>
           <Row title="Data folder" hint="Settings, the list of models you add by hand, logs and the request history.">
             <span className="max-w-[420px] truncate font-mono text-xs text-muted" title={status.home}>{status.home}</span>

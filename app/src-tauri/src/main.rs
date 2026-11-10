@@ -114,6 +114,15 @@ async fn start(app: &tauri::AppHandle, client: &reqwest::Client) -> Result<Strin
     if answering(client).await {
         return Ok("already running".into());
     }
+    // set to start at login: the login agent owns the service, so ask it to start it
+    if eightgent::service::installed() && eightgent::service::kickstart() {
+        for _ in 0..80 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if answering(client).await {
+                return Ok("started".into());
+            }
+        }
+    }
     let program = service_program(app).ok_or("The 8gent service program was not found next to the app.")?;
     let paths = Paths::from_env();
     paths.ensure().map_err(|e| format!("{}: {e}", paths.home.display()))?;

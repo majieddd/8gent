@@ -53,7 +53,7 @@ export interface RequestRecord {
   prompt_tokens: number | null; completion_tokens: number | null; first_token_ms: number | null; duration_ms: number; tokens_per_second: number | null;
 }
 export interface Status {
-  version: string; platform: string; os_version: string; port: number; share: boolean; key_set: boolean; served_name: string; home: string;
+  version: string; platform: string; os_version: string; port: number; also_listening: number[]; login_item: boolean; share: boolean; key_set: boolean; served_name: string; home: string;
   memory_mode: "always" | "idle" | "on_demand"; idle_minutes: number; auto_switch: boolean; uptime_s: number; idle_s: number;
   selection: Selection;
   engine: { state: "stopped" | "loading" | "ready" | "error"; running: Running | null; memory_bytes: number | null; loading: { loader: string; model: string; seconds: number } | null; error: string | null };
@@ -182,6 +182,7 @@ export const api = {
   rescan: () => call<{ ok: boolean; models: number }>("POST", "/8gent/v1/rescan", {}),
   settings: (body: Partial<Pick<Status, "memory_mode" | "idle_minutes" | "auto_switch">>) => call<{ ok: boolean }>("POST", "/8gent/v1/settings", body),
   shutdown: () => call<{ ok: boolean }>("POST", "/8gent/v1/shutdown", {}),
+  loginItem: (enabled: boolean) => call<{ ok: boolean; restarting?: boolean }>("POST", "/8gent/v1/login-item", { enabled }),
   /** Start the service if it is not running (only the app can; a browser tab cannot start programs). */
   startService: () => (inTauri ? invoke<string>("start_service") : Promise.reject(new Error("Run `8gent serve` in a terminal."))),
 };

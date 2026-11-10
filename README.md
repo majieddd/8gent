@@ -88,6 +88,14 @@ service if it is not running; closing the window leaves the service running, so 
 up (Settings has "Stop the service"). To work on the screens in a browser: `8gent serve`, then
 `npm run dev` in `app/` and open http://localhost:1420.
 
+`8gent service install` (or Settings > Start at login) makes the service start when you log in.
+
+**Coming from uzu Home or TensorFold Home:** on its first run 8gent takes over the Home app's
+selection, context window, network sharing and memory mode, and answers on the Home app's port too,
+so Hermes and anything else pointed there keeps working. Switch the Home apps' endpoints and daily
+updates off first (`uzuctl login off`, `uzuctl gateway stop`, `uzuctl engine stop`,
+`uzuctl autoupdate off`; the same with `tfctl`), so that only one of them holds the model.
+
 On macOS, the first time 8gent reads models kept in Documents, Desktop or Downloads, macOS asks
 whether it may. Until you answer, only those models are missing; the rest of 8gent works.
 

@@ -39,6 +39,8 @@ pub struct Plan {
     pub env: BTreeMap<String, String>,
     /// Filled in at start for a managed engine (the port is chosen then).
     pub base_url: String,
+    /// Files to read through in the background while the engine starts.
+    pub prewarm: Vec<PathBuf>,
     pub ready_path: String,
     pub ready_timeout: Duration,
     /// The start line depends on the thinking mode, so changing it means a restart.
@@ -154,7 +156,7 @@ pub fn plan(sel: &Selection, manifests: &[Manifest], library: &Library, cfg: &Co
         let base = base.trim_end_matches('/').trim_end_matches("/v1").to_string();
         return Ok(Plan {
             loader: manifest.id.clone(), loader_name: manifest.name.clone(), model: sel.model.clone(), model_name: model.name.clone(), build: build.clone(), context, thinking: sel.thinking, sessions,
-            managed: false, program: None, args: vec![], env: BTreeMap::new(), base_url: base, ready_path: "/v1/models".into(),
+            managed: false, program: None, args: vec![], env: BTreeMap::new(), base_url: base, prewarm: vec![], ready_path: "/v1/models".into(),
             ready_timeout: Duration::from_secs(5), thinking_in_start: false, engine_model: Some(vars.fill(&manifest.api.model_id, paths)),
         });
     }
@@ -186,12 +188,13 @@ pub fn plan(sel: &Selection, manifests: &[Manifest], library: &Library, cfg: &Co
     }
     env.extend(settings.env.clone());
     let thinking_in_start = start.when.iter().any(|w| w.condition.contains("thinking"));
+    let prewarm: Vec<PathBuf> = start.prewarm.iter().map(|f| PathBuf::from(vars.fill(f, paths))).filter(|f| f.is_file()).collect();
     let engine_model = (manifest.api.model_id != "{auto}").then(|| vars.fill(&manifest.api.model_id, paths));
     // "{port}" stays in the arguments; every other value is filled in now
     let args = args.iter().map(|a| a.split("{port}").map(|part| vars.fill(part, paths)).collect::<Vec<_>>().join("{port}")).collect();
     Ok(Plan {
         loader: manifest.id.clone(), loader_name: manifest.name.clone(), model: sel.model.clone(), model_name: model.name.clone(), build: build.clone(), context, thinking: sel.thinking, sessions,
-        managed: true, program: Some(program), args, env, base_url: String::new(), ready_path: start.ready_path.clone(),
+        managed: true, program: Some(program), args, env, base_url: String::new(), prewarm, ready_path: start.ready_path.clone(),
         ready_timeout: Duration::from_secs(start.ready_timeout_s), thinking_in_start, engine_model,
     })
 }
@@ -360,6 +363,15 @@ impl Engine {
             {
                 use std::io::Write;
                 let _ = writeln!(log, "8gent: {} starting {} ({}) on 127.0.0.1:{port}, context {}: {} {}", crate::stats::now(), plan.model, plan.loader, plan.context, program.display(), args.join(" "));
+            }
+            for file in plan.prewarm.clone() {
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    if let Ok(mut f) = std::fs::File::open(&file) {
+                        let mut buf = vec![0u8; 8 << 20];
+                        while matches!(f.read(&mut buf), Ok(n) if n > 0) {}
+                    }
+                });
             }
             let mut cmd = Command::new(&program);
             cmd.args(&args).envs(&plan.env).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log).kill_on_drop(true);

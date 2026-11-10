@@ -21,6 +21,41 @@ fn conf_reference(conf: &Path, key: &str) -> Option<(String, String)> {
     })
 }
 
+/// How the Home apps were set up, taken over on 8gent's first run so the endpoint behaves as theirs
+/// did: shared on the network or not, when the model is kept loaded, and their ports (8gent answers
+/// on those too). Reads only the apps' settings files, never a model folder.
+pub fn settings_from_home_apps(cfg: &mut Config) {
+    let support = paths::user_home().join("Library/Application Support");
+    let mut first = true;
+    for dir in ["UzuHome/backend", "TensorFoldLauncher"] {
+        let env = env_file(&support.join(dir).join("config.env"));
+        if env.is_empty() {
+            continue;
+        }
+        if let Some(port) = env.get("GATEWAY_PORT").and_then(|p| p.parse::<u16>().ok()) {
+            if port != cfg.port && !cfg.also_listen.contains(&port) {
+                cfg.also_listen.push(port);
+            }
+        }
+        if env.get("SHARE_ON_NETWORK").is_some_and(|v| v == "1") {
+            cfg.share = true;
+        }
+        // the first app found is the one whose model is taken over; its memory settings come with it
+        if first {
+            first = false;
+            match env.get("MEMORY_MODE").map(String::as_str) {
+                Some("always") => cfg.memory_mode = crate::config::MemoryMode::Always,
+                Some("ondemand") => cfg.memory_mode = crate::config::MemoryMode::OnDemand,
+                Some("idle") => cfg.memory_mode = crate::config::MemoryMode::Idle,
+                _ => {}
+            }
+            if let Some(m) = env.get("IDLE_MINUTES").and_then(|v| v.parse::<f64>().ok()) {
+                cfg.idle_minutes = m;
+            }
+        }
+    }
+}
+
 /// uzu Home's selection if it is installed, else TensorFold Home's. uzu's number of conversations is
 /// carried into the config too.
 pub fn selection_from_home_apps(library: &Library, cfg: &mut Config) -> Option<Selection> {

@@ -172,6 +172,7 @@ sending headers before the engine has answered at all; shared sampling defaults.
 | `POST /settings` | `{memory_mode?, idle_minutes?, auto_switch?}`, saved at once |
 | `POST /rescan` | look again for loaders and models; says which places have not answered yet |
 | `POST /shutdown` | stop the service and its engine |
+| `POST /login-item` | `{enabled}`: start at login or not (macOS: a launchd agent of the user) |
 
 `/models` gives, for every model and loader pair, what a client needs to price any context window
 itself (`base_bytes + kv_bytes_per_token x window x sessions`) and the speed measured so far.
@@ -217,13 +218,24 @@ Home), because two loaded models share one computer's memory.
 **Built.** `8gent serve` runs the service; `status`, `loaders`, `models`, `use <model> [--loader]
 [--context 64K] [--thinking on|off]`, `start`, `stop`, `logs` and `rescan` ask a running one.
 
-## First run
+## First run, and taking over from the Home apps
 
-**Built.** If uzu Home (else TensorFold Home) is installed, 8gent selects what it had selected, with
-its context window and number of conversations. Nothing is loaded until a request arrives.
+**Built.** If uzu Home (else TensorFold Home) is installed, 8gent takes over its setup on the first
+run: what was selected, with its context window and number of conversations; whether the endpoint is
+shared on the network; when the model is kept loaded; and the app's port, which 8gent then answers
+on as well (`also_listen`), so whatever pointed at a Home app keeps working. A model the Home app
+kept loaded is loaded.
 
-**Planned:** importing their request history and speed logs; answering on their old ports (8585 and
-8484) so nothing that points at them has to change on the day of the move.
+`8gent service install` makes the service start at login (and starts it now); the app's Settings
+has the same switch. On macOS this is a launchd agent of the user, marked interactive so that
+launchd does not throttle its disk reads (an engine started by a background job took minutes to load
+a model). It restarts the service after a crash, not after "Stop the service".
+
+Moving over by hand: switch the Home apps' endpoints and daily updates off (`uzuctl login off`,
+`uzuctl gateway stop`, `uzuctl engine stop`, `uzuctl autoupdate off`, and the same with `tfctl`),
+then `8gent service install`.
+
+**Planned:** importing their request history and speed logs.
 
 ## Testing
 
@@ -313,8 +325,8 @@ of this section is built.
 In the order agreed:
 
 1. ~~Chat (direct to the model) and Monitor screens.~~ Done.
-2. Daily setup on a Mac: start at login, the Home apps' old ports, Hermes pointed here, history
-   import.
+2. ~~Daily setup on a Mac: start at login, the Home apps' old ports, their settings taken over.~~
+   Done (`8gent service install`, `also_listen`). Their request history is not imported.
 3. Engine install and update, starting with the uzu and TensorFold paths the Home apps have.
 4. One memory budget, peak-memory measurement, and a second slot for a small always-on model.
 5. Releases with in-app updates (GitHub and a page on the kr8 site); the Home apps' repositories

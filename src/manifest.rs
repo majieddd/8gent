@@ -78,6 +78,10 @@ pub struct Start {
     pub when: Vec<WhenArgs>,
     pub env: BTreeMap<String, String>,
     pub env_when: Vec<WhenEnv>,
+    /// Files read through in the background as the engine starts: sequential reads fill the file
+    /// cache at the disk's full speed, where an engine's own first touches of a cold file are much
+    /// slower (a 9B model took about 40 s to load cold with uzu, 2 s once cached).
+    pub prewarm: Vec<String>,
     /// Answers 200 once the model is loaded.
     pub ready_path: String,
     pub ready_timeout_s: u64,
@@ -90,6 +94,7 @@ impl Default for Start {
             when: vec![],
             env: BTreeMap::new(),
             env_when: vec![],
+            prewarm: vec![],
             ready_path: "/v1/models".into(),
             ready_timeout_s: 600,
         }

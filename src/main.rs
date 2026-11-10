@@ -17,6 +17,8 @@ const HELP: &str = "8gent: one local endpoint in front of any model loader
   8gent start | stop                  load or unload the selected model
   8gent logs [--loader L] [-n N]      the engine's own output
   8gent rescan                        look again for loaders and models
+  8gent service install | uninstall | status
+                                      start the service at login (and now), or stop doing so
 
   EIGHTGENT_HOME    the folder for config, logs and state (default: the per-user data folder)
 ";
@@ -36,6 +38,7 @@ fn main() {
                 println!("8gent {}", eightgent::VERSION);
                 Ok(())
             }
+            "service" => service(&args[1..]).await,
             _ => client(command, &args[1..]).await,
         }
     });
@@ -58,9 +61,69 @@ async fn serve(args: &[String]) -> Result<(), String> {
     let port = option(args, &["--port", "-p"]).and_then(|p| p.parse().ok()).unwrap_or(cfg.port);
     let host = if cfg.share { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
     let addr = SocketAddr::from((host, port));
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("cannot listen on {addr}: {e} (is 8gent already running?)"))?;
+    // a service that is handing over to this one may hold the port for a few more seconds
+    let mut tries = 0;
+    let listener = loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => break l,
+            Err(e) if tries >= 40 => return Err(format!("cannot listen on {addr}: {e} (is 8gent already running?)")),
+            Err(_) => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    };
+    for alias in cfg.also_listen.iter().filter(|p| **p != port) {
+        tokio::spawn(server::serve_alias(app.clone(), SocketAddr::from((host, *alias))));
+    }
     eprintln!("8gent {}: serving http://{addr}/v1 ({} loaders; data in {})", eightgent::VERSION, app.manifests.len(), app.paths.home.display());
     server::serve(app, listener, shutdown_signal()).await
+}
+
+/// `8gent service install`: from now on the service starts at login, and it is started now.
+async fn service(args: &[String]) -> Result<(), String> {
+    use eightgent::service;
+    let paths = Paths::from_env();
+    let port = Config::load(&paths).map(|c| c.port).unwrap_or(eightgent::config::DEFAULT_PORT);
+    let health = format!("http://127.0.0.1:{port}/health");
+    let http = reqwest::Client::new();
+    let up = || async { http.get(&health).timeout(std::time::Duration::from_millis(800)).send().await.is_ok_and(|r| r.status().is_success()) };
+    match args.first().map(String::as_str) {
+        Some("install") => {
+            let program = std::env::current_exe().map_err(|e| e.to_string())?;
+            service::write(&program, &paths)?;
+            if up().await {
+                // one that was started by hand or by the app: it lets go of the port first
+                let _ = http.post(format!("http://127.0.0.1:{port}/8gent/v1/shutdown")).header("content-type", "application/json").body("{}").send().await;
+                for _ in 0..40 {
+                    if !up().await {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+            service::load()?;
+            for _ in 0..60 {
+                if up().await {
+                    println!("8gent now starts at login and is running ({})", program.display());
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(format!("the service was set up but is not answering; see {}", paths.logs().join("service.log").display()))
+        }
+        Some("uninstall") => {
+            service::remove(true)?;
+            println!("8gent no longer starts at login, and its service is stopped");
+            Ok(())
+        }
+        Some("status") => {
+            println!("starts at login: {}", if service::installed() { "yes" } else { "no" });
+            println!("running: {}", if up().await { "yes" } else { "no" });
+            Ok(())
+        }
+        _ => Err("usage: 8gent service install | uninstall | status".into()),
+    }
 }
 
 async fn shutdown_signal() {

@@ -69,6 +69,8 @@ pub struct App {
     also_loaded: RwLock<Vec<String>>,
     /// Told to stop through the control API.
     pub quit: tokio::sync::Notify,
+    /// The extra ports that are answering right now.
+    pub aliases: RwLock<Vec<u16>>,
     /// Pieces of answers written since the service started; the monitor reads its rate.
     pub live_tokens: AtomicU64,
     /// One sample a second for the Monitor screen, the last three minutes.
@@ -126,8 +128,11 @@ impl App {
         let paths = opts.paths;
         paths.ensure().map_err(|e| format!("{}: {e}", paths.home.display()))?;
         let first_run = !paths.config().exists();
-        let cfg = Config::load(&paths)?;
+        let mut cfg = Config::load(&paths)?;
         if first_run {
+            if opts.import_external {
+                crate::import::settings_from_home_apps(&mut cfg);
+            }
             cfg.save(&paths)?;
         }
         let manifests = manifest::load_all(&paths)?;
@@ -155,6 +160,7 @@ impl App {
             total_memory: host::total_memory(),
             also_loaded: RwLock::new(vec![]),
             quit: tokio::sync::Notify::new(),
+            aliases: RwLock::new(vec![]),
             live_tokens: AtomicU64::new(0),
             monitor: std::sync::Mutex::new(std::collections::VecDeque::new()),
             last_activity: AtomicU64::new(now()),
@@ -272,11 +278,24 @@ impl App {
             let mut cfg = self.config();
             if let Some(sel) = crate::import::selection_from_home_apps(&lib, &mut cfg) {
                 eprintln!("8gent: first run: taking over {} on {} from the Home app", sel.model, sel.loader);
-                let mut g = self.cfg.write().unwrap();
-                if !g.selection.is_set() {
-                    g.loaders = cfg.loaders;
-                    g.selection = sel;
-                    let _ = g.save(&self.paths);
+                let taken = {
+                    let mut g = self.cfg.write().unwrap();
+                    let free = !g.selection.is_set();
+                    if free {
+                        g.loaders = cfg.loaders;
+                        g.selection = sel.clone();
+                        let _ = g.save(&self.paths);
+                    }
+                    free
+                };
+                // "keep the model loaded" was the Home app's setting: load it now, as the Home app would have
+                if taken && self.config().memory_mode == MemoryMode::Always {
+                    let app = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = app.acquire(&sel).await {
+                            eprintln!("8gent: could not load {}: {}", sel.model, normalize::error_message(&e.body).unwrap_or_default());
+                        }
+                    });
                 }
             }
         }
@@ -552,7 +571,8 @@ impl App {
         let loading = self.engine.loading().map(|(loader, model, s)| json!({"loader": loader, "model": model, "seconds": (s * 10.0).round() / 10.0}));
         json!({
             "name": "8gent", "version": crate::VERSION, "platform": manifest::platform(), "os_version": self.os_version,
-            "port": cfg.port, "share": cfg.share, "key_set": cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            "port": cfg.port, "also_listening": self.aliases.read().unwrap().clone(), "also_listen": cfg.also_listen,
+            "login_item": crate::service::installed(), "share": cfg.share, "key_set": cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
             "served_name": cfg.served_name, "memory_mode": cfg.memory_mode, "idle_minutes": cfg.idle_minutes, "auto_switch": cfg.auto_switch,
             "home": self.paths.home.to_string_lossy(),
             "scanning": self.pending.read().unwrap().iter().collect::<Vec<_>>(),
@@ -621,6 +641,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/8gent/v1/engine/stop", post(engine_stop))
         .route("/8gent/v1/rescan", post(rescan))
         .route("/8gent/v1/shutdown", post(shutdown))
+        .route("/8gent/v1/login-item", post(login_item))
         .fallback(forward)
         .layer(DefaultBodyLimit::disable())
         .with_state(app)
@@ -843,6 +864,30 @@ async fn shutdown(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, h
     Ok(Json(json!({"ok": true})))
 }
 
+/// Start at login, or stop doing so: `{enabled}`. Switching it on while the service was started some
+/// other way hands the service over to the login agent: this one stops and the agent's starts.
+async fn login_item(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let enabled = body.get("enabled").and_then(|v| v.as_bool()).ok_or_else(|| ApiErr::bad_request("enabled is true or false."))?;
+    let fail = |e: String| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None);
+    if !enabled {
+        crate::service::remove(false).map_err(fail)?;
+        return Ok(Json(json!({"ok": true, "login_item": false})));
+    }
+    let program = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
+    crate::service::write(&program, &app.paths).map_err(fail)?;
+    let handing_over = !crate::service::started_at_login();
+    if handing_over {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            // the agent's service takes the port once this one has let go of it
+            let _ = std::process::Command::new("/bin/sh").args(["-c", "sleep 3; /bin/launchctl bootstrap gui/$(id -u) \"$0\"", &crate::service::plist_path().to_string_lossy()]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+            app.quit.notify_waiters();
+        });
+    }
+    Ok(Json(json!({"ok": true, "login_item": true, "restarting": handing_over})))
+}
+
 /// Everything else under /v1 goes to the engine; other paths do not exist.
 async fn forward(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(e) = authorize(&app, &remote, &headers, false) {
@@ -898,5 +943,19 @@ mod tests {
         assert!(allowed(false, Some("k"), Some("k"), false) && allowed(false, Some("k"), Some("k"), true));
         // another computer, no key set: the endpoint is open (the user chose to share it), the control API is not
         assert!(allowed(false, None, None, false) && !allowed(false, None, None, true) && !allowed(false, Some(""), None, true));
+    }
+}
+
+/// Answer on one more port (the address of a Home app 8gent replaced). If something else holds the
+/// port, try again every 10 s: the Home app may still be shutting down, or be opened again later.
+pub async fn serve_alias(app: Arc<App>, addr: SocketAddr) {
+    loop {
+        if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+            eprintln!("8gent: also answering on http://{addr}/v1");
+            app.aliases.write().unwrap().push(addr.port());
+            let _ = axum::serve(listener, router(app.clone()).into_make_service_with_connect_info::<SocketAddr>()).await;
+            app.aliases.write().unwrap().retain(|p| *p != addr.port());
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }

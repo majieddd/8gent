@@ -17,6 +17,7 @@ pub mod normalize;
 pub mod paths;
 pub mod proxy;
 pub mod server;
+pub mod service;
 pub mod stats;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
