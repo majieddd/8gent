@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECENT: usize = 200;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RequestRecord {
     pub at: u64,
     pub loader: String,
@@ -53,6 +54,8 @@ pub struct Speed {
     pub loader: String,
     pub model: String,
     pub requests: u64,
+    /// How many of them were long enough to say something about speed.
+    pub measured: u64,
     pub mean_tokens_per_second: Option<f64>,
     pub mean_first_token_ms: Option<f64>,
     #[serde(skip)]
@@ -88,6 +91,49 @@ impl Recorder {
         Self { inner: Mutex::new(Inner::default()), log }
     }
 
+    /// Read the speeds of earlier runs back from the request log, so "which loader is fastest for this
+    /// model" survives a restart. Totals and the recent list start fresh.
+    pub fn restore_speeds(&self) {
+        let Some(path) = &self.log else { return };
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let lines: Vec<&str> = text.lines().collect();
+        let mut g = self.inner.lock().unwrap();
+        for line in &lines[lines.len().saturating_sub(20_000)..] {
+            if let Ok(rec) = serde_json::from_str::<RequestRecord>(line) {
+                if rec.finish == "ok" {
+                    Self::add_speed(&mut g, &rec);
+                }
+            }
+        }
+    }
+
+    fn add_speed(g: &mut Inner, rec: &RequestRecord) {
+        let s = g.speed.entry((rec.loader.clone(), rec.model.clone())).or_insert_with(|| Speed { loader: rec.loader.clone(), model: rec.model.clone(), ..Default::default() });
+        s.requests += 1;
+        // a handful of tokens says nothing about speed
+        if let (Some(tps), Some(n)) = (rec.tokens_per_second, rec.completion_tokens) {
+            if n >= 16 && tps.is_finite() {
+                s.tps_sum += tps;
+                s.tps_n += 1;
+                s.measured = s.tps_n;
+                s.mean_tokens_per_second = Some(s.tps_sum / s.tps_n as f64);
+            }
+        }
+        if let Some(ms) = rec.first_token_ms {
+            s.ttft_sum += ms as f64;
+            s.ttft_n += 1;
+            s.mean_first_token_ms = Some(s.ttft_sum / s.ttft_n as f64);
+        }
+    }
+
+    pub fn speed_for(&self, loader: &str, model: &str) -> Option<Speed> {
+        self.inner.lock().unwrap().speed.get(&(loader.to_string(), model.to_string())).cloned()
+    }
+
+    pub fn recent(&self, limit: usize) -> Vec<RequestRecord> {
+        self.inner.lock().unwrap().recent.iter().rev().take(limit).cloned().collect()
+    }
+
     pub fn begin(&self) {
         self.inner.lock().unwrap().in_flight += 1;
     }
@@ -106,21 +152,7 @@ impl Recorder {
         g.totals.prompt_tokens += rec.prompt_tokens.unwrap_or(0);
         g.totals.completion_tokens += rec.completion_tokens.unwrap_or(0);
         if rec.finish == "ok" {
-            let s = g.speed.entry((rec.loader.clone(), rec.model.clone())).or_insert_with(|| Speed { loader: rec.loader.clone(), model: rec.model.clone(), ..Default::default() });
-            s.requests += 1;
-            // a handful of tokens says nothing about speed
-            if let (Some(tps), Some(n)) = (rec.tokens_per_second, rec.completion_tokens) {
-                if n >= 16 && tps.is_finite() {
-                    s.tps_sum += tps;
-                    s.tps_n += 1;
-                    s.mean_tokens_per_second = Some(s.tps_sum / s.tps_n as f64);
-                }
-            }
-            if let Some(ms) = rec.first_token_ms {
-                s.ttft_sum += ms as f64;
-                s.ttft_n += 1;
-                s.mean_first_token_ms = Some(s.ttft_sum / s.ttft_n as f64);
-            }
+            Self::add_speed(&mut g, &rec);
         }
         if let Some(path) = &self.log {
             if let (Ok(line), Ok(mut f)) = (serde_json::to_string(&rec), std::fs::OpenOptions::new().create(true).append(true).open(path)) {

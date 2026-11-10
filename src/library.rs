@@ -76,37 +76,65 @@ impl Library {
     }
 }
 
-/// Everything found on this computer's disks: the hand-written list, then (with `external`) the folders
-/// of LM Studio and the earlier Home apps. Attached servers' models are added by the service, which asks them.
-pub fn scan(paths: &Paths, external: bool) -> Library {
+/// The places models are read from, in the order their builds take precedence when two describe
+/// the same thing. Attached servers' models are added by the service, which asks them.
+pub fn sources(external: bool) -> Vec<&'static str> {
+    if external { vec!["manual", "tensorfoldhome", "uzuhome", "lmstudio"] } else { vec!["manual"] }
+}
+
+/// Read one place. Each is read on its own so that one that is slow, or waiting for macOS to ask
+/// whether a folder may be opened, does not hold back the others.
+pub fn scan_source(source: &str, paths: &Paths) -> Library {
     let mut lib = Library::default();
-    if let Ok(text) = std::fs::read_to_string(paths.models()) {
-        match toml::from_str::<Library>(&text) {
-            Ok(manual) => {
-                for m in manual.models {
-                    for mut b in m.builds {
-                        if b.source.is_empty() {
-                            b.source = "manual".into();
+    let home = paths::user_home();
+    match source {
+        "manual" => {
+            if let Ok(text) = std::fs::read_to_string(paths.models()) {
+                match toml::from_str::<Library>(&text) {
+                    Ok(manual) => {
+                        for m in manual.models {
+                            for mut b in m.builds {
+                                if b.source.is_empty() {
+                                    b.source = "manual".into();
+                                }
+                                b.reference = paths::expand(&b.reference, paths);
+                                lib.add(&m.id, &m.name, b);
+                            }
                         }
-                        b.reference = paths::expand(&b.reference, paths);
-                        lib.add(&m.id, &m.name, b);
                     }
+                    Err(e) => eprintln!("8gent: {}: {e}", paths.models().display()),
                 }
             }
-            Err(e) => eprintln!("8gent: {}: {e}", paths.models().display()),
+        }
+        "tensorfoldhome" => scan_tensorfold_home(&home.join("Library/Application Support/TensorFoldLauncher/models.conf"), &mut lib),
+        "uzuhome" => scan_uzu_home(&home.join("Library/Application Support/UzuHome/backend/models.conf"), &mut lib),
+        "lmstudio" => {
+            let dir = std::env::var_os("EIGHTGENT_LMSTUDIO_MODELS").map(PathBuf::from).unwrap_or(home.join(".lmstudio/models"));
+            scan_lmstudio(&dir, &mut lib);
+        }
+        _ => {}
+    }
+    lib
+}
+
+/// Several libraries as one, earlier ones first.
+pub fn merge<'a>(parts: impl IntoIterator<Item = &'a Library>) -> Library {
+    let mut lib = Library::default();
+    for part in parts {
+        for m in &part.models {
+            for b in &m.builds {
+                lib.add(&m.id, &m.name, b.clone());
+            }
         }
     }
-    if !external {
-        lib.sort();
-        return lib;
-    }
-    let home = paths::user_home();
-    scan_tensorfold_home(&home.join("Library/Application Support/TensorFoldLauncher/models.conf"), &mut lib);
-    scan_uzu_home(&home.join("Library/Application Support/UzuHome/backend/models.conf"), &mut lib);
-    let lmstudio = std::env::var_os("EIGHTGENT_LMSTUDIO_MODELS").map(PathBuf::from).unwrap_or(home.join(".lmstudio/models"));
-    scan_lmstudio(&lmstudio, &mut lib);
     lib.sort();
     lib
+}
+
+/// Every place, one after the other.
+pub fn scan(paths: &Paths, external: bool) -> Library {
+    let parts: Vec<Library> = sources(external).into_iter().map(|s| scan_source(s, paths)).collect();
+    merge(&parts)
 }
 
 /// `<publisher>/<repo>/` folders: GGUF files (one build each, projector files skipped) and MLX folders.
@@ -320,7 +348,7 @@ pub fn gguf_facts(path: &Path) -> Option<GgufFacts> {
     for _ in 0..count.min(100_000) {
         let key = read_string(&mut r)?;
         let kind = read_u32(&mut r)?;
-        let suffix = ["context_length", "block_count", "embedding_length", "attention.head_count_kv", "attention.head_count"]
+        let suffix = ["context_length", "block_count", "embedding_length", "attention.head_count_kv", "attention.head_count", "attention.key_length", "attention.value_length", "full_attention_interval"]
             .into_iter()
             .find(|s| key.ends_with(&format!(".{s}")) && key.matches('.').count() == s.matches('.').count() + 1);
         match (suffix, read_scalar(&mut r, kind)?) {
@@ -331,11 +359,25 @@ pub fn gguf_facts(path: &Path) -> Option<GgufFacts> {
         }
     }
     let get = |k: &str| wanted.get(k).copied();
-    let kv = (|| {
-        let head_dim = get("embedding_length")? / get("attention.head_count")?.max(1);
-        Some(get("block_count")? * 2 * get("attention.head_count_kv").or(get("attention.head_count"))? * head_dim * 2)
-    })();
+    let kv = gguf_kv_bytes(&get);
     Some(GgufFacts { context_length: get("context_length").map(|v| v as u32), kv_bytes_per_token: kv.filter(|n| *n > 0) })
+}
+
+/// KV-cache bytes per token of context, as llama.cpp allocates it: f16 keys and values for every
+/// KV head, in the layers that have attention. Hybrid models (Qwen3.5) have it in one layer of every
+/// `full_attention_interval`: the 0.8B's 24 blocks give 6 layers x 2 heads x (256 + 256) x 2 bytes =
+/// 12,288 bytes, which is llama.cpp's own 768 MiB for a 65,536-token window.
+fn gguf_kv_bytes(get: &dyn Fn(&str) -> Option<u64>) -> Option<u64> {
+    let blocks = get("block_count")?;
+    let layers = match get("full_attention_interval") {
+        Some(every) if every > 0 => blocks / every,
+        _ => blocks,
+    };
+    let heads = get("attention.head_count")?.max(1);
+    let per_head = get("embedding_length").map(|e| e / heads);
+    let key = get("attention.key_length").or(per_head)?;
+    let value = get("attention.value_length").or(per_head)?;
+    Some(layers * get("attention.head_count_kv").unwrap_or(heads) * (key + value) * 2)
 }
 
 fn read_u32(r: &mut impl Read) -> Option<u32> {
@@ -451,6 +493,20 @@ mod tests {
         assert_eq!(gguf_quant("Qwythos-9B-v2-MTP-Q6_K.gguf").as_deref(), Some("Q6_K"));
         assert_eq!(gguf_quant("model.gguf"), None);
         assert_eq!(mlx_quant("OxCoder-9B-mlx-4Bit").as_deref(), Some("4-bit"));
+    }
+
+    #[test]
+    fn gguf_kv_matches_llama_cpp() {
+        let hybrid = |k: &str| match k {
+            "block_count" => Some(24), "full_attention_interval" => Some(4), "attention.head_count" => Some(8),
+            "attention.head_count_kv" => Some(2), "embedding_length" => Some(1024),
+            "attention.key_length" | "attention.value_length" => Some(256), _ => None,
+        };
+        assert_eq!(gguf_kv_bytes(&hybrid), Some(12_288)); // llama.cpp: 768 MiB at 65,536 tokens
+        let plain = |k: &str| match k {
+            "block_count" => Some(28), "attention.head_count" => Some(24), "attention.head_count_kv" => Some(8), "embedding_length" => Some(3072), _ => None,
+        };
+        assert_eq!(gguf_kv_bytes(&plain), Some(28 * 8 * (128 + 128) * 2));
     }
 
     #[test]

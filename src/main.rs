@@ -59,7 +59,7 @@ async fn serve(args: &[String]) -> Result<(), String> {
     let host = if cfg.share { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
     let addr = SocketAddr::from((host, port));
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("cannot listen on {addr}: {e} (is 8gent already running?)"))?;
-    eprintln!("8gent {}: serving http://{addr}/v1 ({} loaders, {} models; data in {})", eightgent::VERSION, app.manifests.len(), app.library.read().unwrap().models.len(), app.paths.home.display());
+    eprintln!("8gent {}: serving http://{addr}/v1 ({} loaders; data in {})", eightgent::VERSION, app.manifests.len(), app.paths.home.display());
     server::serve(app, listener, shutdown_signal()).await
 }
 
@@ -149,7 +149,15 @@ async fn call(req: reqwest::RequestBuilder) -> Result<Value, String> {
     let resp = req.send().await.map_err(|e| if e.is_connect() { "the service is not running (start it with `8gent serve`)".to_string() } else { e.to_string() })?;
     let ok = resp.status().is_success();
     let body: Value = resp.json().await.map_err(|e| e.to_string())?;
-    if ok { Ok(body) } else { Err(body["error"]["message"].as_str().unwrap_or("the service refused the request").to_string()) }
+    if ok {
+        return Ok(body);
+    }
+    // the sentence, then the engine's own last output when the service passed it on
+    let message = body["error"]["message"].as_str().unwrap_or("the service refused the request");
+    match body["error"]["detail"].as_str().filter(|d| !d.is_empty()) {
+        Some(detail) => Err(format!("{message}\n\n{detail}")),
+        None => Err(message.to_string()),
+    }
 }
 
 /// "64K" and "1M" count in 1024s, like the context sizes models are built with.

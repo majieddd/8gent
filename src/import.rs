@@ -48,3 +48,21 @@ pub fn selection_from_home_apps(library: &Library, cfg: &mut Config) -> Option<S
     let model = model_with("mlx", &reference)?;
     Some(Selection { loader: "tensorfold".into(), model, context: env.get("CONTEXT").and_then(|v| v.parse().ok()).unwrap_or(0), thinking: env.get("THINKING").is_some_and(|v| v == "on") })
 }
+
+/// The Home apps' own engines, by the port each is configured to use. A model loaded there holds
+/// memory that 8gent's model then has to share.
+pub fn home_app_engines() -> Vec<(&'static str, u16)> {
+    let support = paths::user_home().join("Library/Application Support");
+    let port = |dir: &str, default: u16| -> Option<u16> {
+        let file = support.join(dir).join("config.env");
+        file.is_file().then(|| env_file(&file).get("ENGINE_PORT").and_then(|p| p.parse().ok()).unwrap_or(default))
+    };
+    let mut out = vec![];
+    if let Some(p) = port("UzuHome/backend", 18585) {
+        out.push(("uzu Home", p));
+    }
+    if let Some(p) = port("TensorFoldLauncher", 18484) {
+        out.push(("TensorFold Home", p));
+    }
+    out
+}

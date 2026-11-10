@@ -5,12 +5,13 @@ Ollama, LM Studio, Strata) and a model; Hermes, kr8 and every other app keep the
 whatever you choose: `http://127.0.0.1:8436/v1`.
 
 8gent continues uzu Home, TensorFold Home and StrataHome as one modular project, and is part of the
-kr8 family. This repository holds the service and its command line. The app is next; the plan for
-it, and for everything else, is in [docs/DESIGN.md](docs/DESIGN.md).
+kr8 family. This repository holds the service, its command line and the first version of the app.
+What is built and what is planned is in [docs/DESIGN.md](docs/DESIGN.md).
 
 **Status: early.** The service runs and is tested with real models on llama.cpp, TensorFold, uzu
 and Ollama on an Apple Silicon Mac. It uses engines that are already installed; it does not install
-or update them yet. There is no app and no release yet.
+or update them yet. The app builds and runs on that Mac; there is no release yet, and nothing has
+been built on Windows or Linux.
 
 ## What it does today
 
@@ -67,6 +68,29 @@ On its first run 8gent selects what uzu Home (or TensorFold Home) had selected, 
 Nothing loads until a request arrives. **Do not load the same large model in a Home app and in 8gent
 at once:** each keeps its own copy in memory.
 
+## The app
+
+In [app/](app/): Tauri with React and Tailwind, in kr8's look. Home shows what is serving; Models
+shows, for the model you pick, every loader that can run it with its measured speed and the memory
+it needs at the context window you choose, and switches with one press. Loaders, Requests, Logs and
+Settings are there too. It needs Node (built with 22) and Rust.
+
+```bash
+cargo build --release
+```
+
+```bash
+cd app && npm install && npx tauri build
+```
+
+The app is then at `app/src-tauri/target/release/bundle/macos/8gent.app`. Opening it starts the
+service if it is not running; closing the window leaves the service running, so the endpoint stays
+up (Settings has "Stop the service"). To work on the screens in a browser: `8gent serve`, then
+`npm run dev` in `app/` and open http://localhost:1420.
+
+On macOS, the first time 8gent reads models kept in Documents, Desktop or Downloads, macOS asks
+whether it may. Until you answer, only those models are missing; the rest of 8gent works.
+
 ## Loaders
 
 | Loader | How 8gent uses it | Runs |
@@ -97,7 +121,7 @@ format. Put your own in the `loaders` folder of 8gent's data folder.
 cargo test
 ```
 
-16 unit tests and 15 conformance tests. The conformance tests run the real service against
+17 unit tests and 15 conformance tests. The conformance tests run the real service against
 `mock-engine`, a stand-in engine that reproduces each loader's quirks without a model or a GPU.
 
 ## Source
@@ -112,5 +136,7 @@ cargo test
 | `src/stats.rs` | requests and speed |
 | `src/main.rs` | the `8gent` command |
 | `src/bin/mock_engine.rs`, `tests/conformance.rs` | the stand-in engine and the tests |
+| `app/src` | the app's screens (React); `app/src/lib/api.ts` is its one way to the service |
+| `app/src-tauri` | the window (Tauri): the `api` command and starting the service |
 
 Not affiliated with Mirai, TensorFold, llama.cpp, Ollama, LM Studio or Strata. MIT licence.

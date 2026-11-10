@@ -28,6 +28,7 @@ pub struct Plan {
     pub loader: String,
     pub loader_name: String,
     pub model: String,
+    pub model_name: String,
     pub build: Build,
     pub context: u32,
     pub thinking: bool,
@@ -152,7 +153,7 @@ pub fn plan(sel: &Selection, manifests: &[Manifest], library: &Library, cfg: &Co
         let base = settings.base_url.unwrap_or(attach.base_url.clone());
         let base = base.trim_end_matches('/').trim_end_matches("/v1").to_string();
         return Ok(Plan {
-            loader: manifest.id.clone(), loader_name: manifest.name.clone(), model: sel.model.clone(), build: build.clone(), context, thinking: sel.thinking, sessions,
+            loader: manifest.id.clone(), loader_name: manifest.name.clone(), model: sel.model.clone(), model_name: model.name.clone(), build: build.clone(), context, thinking: sel.thinking, sessions,
             managed: false, program: None, args: vec![], env: BTreeMap::new(), base_url: base, ready_path: "/v1/models".into(),
             ready_timeout: Duration::from_secs(5), thinking_in_start: false, engine_model: Some(vars.fill(&manifest.api.model_id, paths)),
         });
@@ -189,7 +190,7 @@ pub fn plan(sel: &Selection, manifests: &[Manifest], library: &Library, cfg: &Co
     // "{port}" stays in the arguments; every other value is filled in now
     let args = args.iter().map(|a| a.split("{port}").map(|part| vars.fill(part, paths)).collect::<Vec<_>>().join("{port}")).collect();
     Ok(Plan {
-        loader: manifest.id.clone(), loader_name: manifest.name.clone(), model: sel.model.clone(), build: build.clone(), context, thinking: sel.thinking, sessions,
+        loader: manifest.id.clone(), loader_name: manifest.name.clone(), model: sel.model.clone(), model_name: model.name.clone(), build: build.clone(), context, thinking: sel.thinking, sessions,
         managed: true, program: Some(program), args, env, base_url: String::new(), ready_path: start.ready_path.clone(),
         ready_timeout: Duration::from_secs(start.ready_timeout_s), thinking_in_start, engine_model,
     })
@@ -272,7 +273,7 @@ impl Engine {
                 g.child = None;
                 g.running = None;
                 g.state = State::Error;
-                g.last_error = Some(format!("The engine stopped by itself ({status}). {}", log_tail(&self.paths.engine_log(&loader), 6)));
+                g.last_error = Some(format!("The engine stopped by itself ({status}).{}", log_tail(&self.paths.engine_log(&loader), 6)));
                 let _ = std::fs::remove_file(self.paths.engine_record());
             }
         }
@@ -363,13 +364,13 @@ impl Engine {
                 };
                 if let Some(status) = exited {
                     g.child = None;
-                    return Err(format!("{} stopped while loading {} ({status}). {}", plan.loader_name, plan.model, log_tail(&self.paths.engine_log(&plan.loader), 8)));
+                    return Err(format!("{} stopped while loading {} ({status}).{}", plan.loader_name, plan.model_name, log_tail(&self.paths.engine_log(&plan.loader), 8)));
                 }
             } else {
                 return Err(format!("{}'s server is not answering at {}. Start it, then try again.", plan.loader_name, plan.base_url));
             }
             if Instant::now() >= deadline {
-                return Err(format!("{} did not finish loading {} within {} s.", plan.loader_name, plan.model, plan.ready_timeout.as_secs()));
+                return Err(format!("{} did not finish loading {} within {} s.", plan.loader_name, plan.model_name, plan.ready_timeout.as_secs()));
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
@@ -473,14 +474,15 @@ pub fn process_memory(pid: u32) -> Option<u64> {
     }
 }
 
-/// The last lines of a log as one sentence-like string, for error messages.
+/// The last lines of a log, for the end of an error message: a blank line, then the engine's own
+/// words. The first line of the message stays a sentence a person can read on its own.
 pub fn log_tail(path: &PathBuf, lines: usize) -> String {
     let Ok(text) = std::fs::read_to_string(path) else { return String::new() };
     let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty() && !l.starts_with("8gent:")).take(lines).collect();
     if tail.is_empty() {
         return String::new();
     }
-    format!("Its last output: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | "))
+    format!("\n\n{}", tail.into_iter().rev().collect::<Vec<_>>().join("\n"))
 }
 
 /// Keep the newest half of a log that has grown past `max` bytes.

@@ -83,6 +83,7 @@ async fn service_with(config: &str) -> Service {
     std::fs::write(home.join("config.toml"), config).unwrap();
     let mut opts = Options::new(Paths::at(&home));
     opts.import_external = false;
+    opts.wait_for_scan = true;
     opts.housekeeping_every = Duration::from_millis(200);
     let app = App::build(opts).await.unwrap();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -261,7 +262,8 @@ async fn a_switch_that_will_not_load_goes_back_to_what_was_running() {
     assert_eq!(code, 409, "{v}");
     assert_eq!((v["rolled_back"].as_bool(), v["restored"].as_bool()), (Some(true), Some(true)), "{v}");
     let msg = v["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("not enough memory") && msg.contains("went back to alpha on mocka"), "the engine's own reason is passed on: {msg}");
+    assert!(msg.contains("mockfail stopped while loading Alpha") && msg.ends_with("8gent went back to Alpha on mocka."), "{msg}");
+    assert!(v["error"]["detail"].as_str().unwrap().contains("not enough memory"), "the engine's own reason is passed on: {v}");
     let st = s.status().await;
     assert_eq!((st["selection"]["loader"].as_str(), st["engine"]["state"].as_str()), (Some("mocka"), Some("ready")));
     assert_eq!(reply(&s.chat("8gent", "hi").await.1), "reply from mocka");
@@ -371,8 +373,20 @@ async fn stop_and_start_and_the_lists() {
     assert_eq!(on_a["runnable"], true);
     // weights 5 GB + 1.1 GB runtime + 32 KB a token over 65,536 tokens
     assert_eq!(on_a["estimated_memory_bytes"].as_u64(), Some(5_000_000_000 + 1_100_000_000 + 32768 * 65536));
+    assert_eq!((on_a["base_bytes"].as_u64(), on_a["kv_bytes_per_token"].as_u64(), on_a["context"].as_u64()), (Some(6_100_000_000), Some(32768), Some(65536)));
+    assert_eq!((on_a["selected"].as_bool(), on_a["serving"].as_bool()), (Some(true), Some(false)));
+
+    // settings are saved and answered back; nonsense is refused
+    let (code, v) = s.post("/8gent/v1/settings", json!({"memory_mode": "on_demand", "idle_minutes": 10, "auto_switch": false})).await;
+    assert_eq!((code, v["memory_mode"].as_str(), v["idle_minutes"].as_f64(), v["auto_switch"].as_bool()), (200, Some("on_demand"), Some(10.0), Some(false)), "{v}");
+    assert_eq!(s.status().await["memory_mode"], "on_demand");
+    assert!(std::fs::read_to_string(s.home.join("config.toml")).unwrap().contains("memory_mode = \"on_demand\""));
+    assert_eq!(s.post("/8gent/v1/settings", json!({"memory_mode": "sometimes"})).await.0, 400);
+    assert_eq!(s.status().await["selection"]["loader"], "mocka", "settings leave the selection alone");
 
     s.chat("8gent", "hi").await;
+    let recent = s.get("/8gent/v1/requests?limit=5").await.1;
+    assert_eq!((recent["requests"].as_array().unwrap().len(), recent["requests"][0]["finish"].as_str()), (1, Some("ok")), "{recent}");
     let logs = s.get("/8gent/v1/logs?loader=mocka&lines=20").await.1;
     assert!(logs["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("mock-engine: mocka serving alpha")), "{logs}");
 }

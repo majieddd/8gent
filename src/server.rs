@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// What a loaded engine takes on top of its weights and KV cache (measured on 9B models: 0.6 to 1.1 GB).
+const RUNTIME_BYTES: u64 = 1_100_000_000;
+
 pub struct Options {
     pub paths: Paths,
     /// Read the model lists of LM Studio and the earlier Home apps, and on the first run take over
@@ -29,11 +32,14 @@ pub struct Options {
     pub import_external: bool,
     /// How often the service looks for an idle or dead engine.
     pub housekeeping_every: Duration,
+    /// Finish looking for loaders and models before `build` returns. Off for the real service, which
+    /// must answer at once and looks in the background; tests switch it on.
+    pub wait_for_scan: bool,
 }
 
 impl Options {
     pub fn new(paths: Paths) -> Self {
-        Self { paths, import_external: true, housekeeping_every: Duration::from_secs(5) }
+        Self { paths, import_external: true, housekeeping_every: Duration::from_secs(5), wait_for_scan: false }
     }
 }
 
@@ -42,8 +48,14 @@ pub struct App {
     pub cfg: RwLock<Config>,
     pub manifests: Vec<Manifest>,
     pub detected: RwLock<BTreeMap<String, Detected>>,
-    /// Models found on disk; attached servers' models are merged over it into `library`.
-    disk_library: RwLock<Library>,
+    /// What each place on disk held when it was last read, by source.
+    parts: RwLock<BTreeMap<String, Library>>,
+    /// What the attached servers listed when last asked: model id, name, build.
+    attached: RwLock<Vec<(String, String, Build)>>,
+    /// Places still being read (a folder macOS is asking permission for stays here until answered).
+    pending: RwLock<std::collections::BTreeSet<String>>,
+    scan_begun: std::sync::atomic::AtomicBool,
+    first_run: std::sync::atomic::AtomicBool,
     pub library: RwLock<Library>,
     pub engine: Engine,
     /// Requests hold it shared while an engine answers them; starting, stopping or switching the
@@ -53,6 +65,10 @@ pub struct App {
     pub http: reqwest::Client,
     pub os_version: String,
     pub total_memory: Option<u64>,
+    /// Other apps on this computer that have a model loaded right now (the earlier Home apps).
+    also_loaded: RwLock<Vec<String>>,
+    /// Told to stop through the control API.
+    pub quit: tokio::sync::Notify,
     last_activity: AtomicU64,
     started: Instant,
     import_external: bool,
@@ -90,44 +106,49 @@ pub struct Target {
 }
 
 impl App {
+    /// Ready to serve at once: nothing here reads model folders or runs other programs. Looking for
+    /// loaders and models happens in [`App::rescan`], in the background unless `wait_for_scan` is set.
     pub async fn build(opts: Options) -> Result<Arc<Self>, String> {
         let paths = opts.paths;
         paths.ensure().map_err(|e| format!("{}: {e}", paths.home.display()))?;
         let first_run = !paths.config().exists();
-        let mut cfg = Config::load(&paths)?;
-        let manifests = manifest::load_all(&paths)?;
-        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).pool_idle_timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
-        let (p, m, c) = (paths.clone(), manifests.clone(), cfg.clone());
-        let import_external = opts.import_external;
-        let (detected, disk) = tokio::task::spawn_blocking(move || (engine::detect(&m, &c, &p), library::scan(&p, import_external))).await.map_err(|e| e.to_string())?;
-        if first_run && import_external {
-            if let Some(sel) = crate::import::selection_from_home_apps(&disk, &mut cfg) {
-                eprintln!("8gent: first run: taking over {} on {} from the Home app", sel.model, sel.loader);
-                cfg.selection = sel;
-            }
+        let cfg = Config::load(&paths)?;
+        if first_run {
             cfg.save(&paths)?;
         }
+        let manifests = manifest::load_all(&paths)?;
+        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).pool_idle_timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
         let engine = Engine::new(paths.clone(), http.clone());
         engine.end_leftover();
+        let stats = Recorder::new(Some(paths.perf_log()));
+        stats.restore_speeds();
         let app = Arc::new(Self {
-            stats: Recorder::new(Some(paths.perf_log())),
+            stats,
             paths,
             cfg: RwLock::new(cfg),
             manifests,
-            detected: RwLock::new(detected),
-            library: RwLock::new(disk.clone()),
-            disk_library: RwLock::new(disk),
+            detected: RwLock::new(BTreeMap::new()),
+            parts: RwLock::new(BTreeMap::new()),
+            attached: RwLock::new(vec![]),
+            pending: RwLock::new(Default::default()),
+            scan_begun: std::sync::atomic::AtomicBool::new(false),
+            first_run: std::sync::atomic::AtomicBool::new(first_run),
+            library: RwLock::new(Library::default()),
             engine,
             gate: Arc::new(tokio::sync::RwLock::new(())),
             http,
             os_version: host::os_version(),
             total_memory: host::total_memory(),
+            also_loaded: RwLock::new(vec![]),
+            quit: tokio::sync::Notify::new(),
             last_activity: AtomicU64::new(now()),
             started: Instant::now(),
-            import_external,
+            import_external: opts.import_external,
             housekeeping_every: opts.housekeeping_every,
         });
-        app.refresh_attached().await;
+        if opts.wait_for_scan {
+            app.rescan().await;
+        }
         Ok(app)
     }
 
@@ -151,11 +172,25 @@ impl App {
         self.detected.read().unwrap().get(id).and_then(|d| d.version.clone())
     }
 
-    /// Ask every attached server (Ollama, LM Studio, Strata) which models it has, and put them in the
-    /// library next to the ones on disk.
+    /// The library as it stands: what each place on disk held, in order of precedence, then what
+    /// the attached servers list.
+    fn publish_library(&self) {
+        let mut lib = {
+            let parts = self.parts.read().unwrap();
+            library::merge(library::sources(self.import_external).into_iter().filter_map(|s| parts.get(s)))
+        };
+        for (id, name, build) in self.attached.read().unwrap().iter() {
+            lib.add(id, name, build.clone());
+        }
+        lib.sort();
+        *self.library.write().unwrap() = lib;
+    }
+
+    /// Ask every attached server (Ollama, LM Studio, Strata) which models it has, and note which of
+    /// the earlier Home apps have a model loaded.
     pub async fn refresh_attached(&self) {
         let cfg = self.config();
-        let mut lib = self.disk_library.read().unwrap().clone();
+        let mut found = vec![];
         for m in self.manifests.iter().filter(|m| m.kind == Kind::Attach && m.supports_platform()) {
             let Some(attach) = &m.attach else { continue };
             let base = cfg.loader(&m.id).base_url.unwrap_or(attach.base_url.clone());
@@ -165,25 +200,70 @@ impl App {
                 Some(body.get("data")?.as_array()?.iter().filter_map(|x| x.get("id")?.as_str().map(String::from)).collect())
             }
             .await;
-            if let Some(d) = self.detected.write().unwrap().get_mut(&m.id) {
-                d.reachable = Some(ids.is_some());
-            }
+            self.detected.write().unwrap().entry(m.id.clone()).or_default().reachable = Some(ids.is_some());
             for remote in ids.unwrap_or_default() {
                 let format = m.formats.first().cloned().unwrap_or(m.id.clone());
-                lib.add(&library::model_id(&remote), &library::display_name(&remote), Build { format, reference: remote.clone(), loader: Some(m.id.clone()), source: m.id.clone(), ..Default::default() });
+                found.push((library::model_id(&remote), library::display_name(&remote), Build { format, reference: remote.clone(), loader: Some(m.id.clone()), source: m.id.clone(), ..Default::default() }));
             }
         }
-        lib.sort();
-        *self.library.write().unwrap() = lib;
+        *self.attached.write().unwrap() = found;
+        self.publish_library();
+
+        let mut loaded = vec![];
+        if self.import_external {
+            for (app, port) in crate::import::home_app_engines() {
+                let answering = self.http.get(format!("http://127.0.0.1:{port}/v1/models")).timeout(Duration::from_millis(600)).send().await.is_ok_and(|r| r.status().is_success());
+                if answering {
+                    loaded.push(app.to_string());
+                }
+            }
+        }
+        *self.also_loaded.write().unwrap() = loaded;
     }
 
-    pub async fn rescan(&self) {
-        let (p, m, c, import) = (self.paths.clone(), self.manifests.clone(), self.config(), self.import_external);
-        if let Ok((detected, disk)) = tokio::task::spawn_blocking(move || (engine::detect(&m, &c, &p), library::scan(&p, import))).await {
-            *self.detected.write().unwrap() = detected;
-            *self.disk_library.write().unwrap() = disk;
+    /// Look (again) for loaders and models. Every place models are read from is read on its own and
+    /// shows up in the library as soon as it has answered. Returns when all of them have.
+    pub async fn rescan(self: &Arc<Self>) {
+        self.scan_begun.store(true, Ordering::Relaxed);
+        let (p, m, c) = (self.paths.clone(), self.manifests.clone(), self.config());
+        let detect = tokio::task::spawn_blocking(move || engine::detect(&m, &c, &p));
+        let mut reads = vec![];
+        for source in library::sources(self.import_external) {
+            self.pending.write().unwrap().insert(source.to_string());
+            let (app, paths) = (self.clone(), self.paths.clone());
+            reads.push(tokio::spawn(async move {
+                if let Ok(part) = tokio::task::spawn_blocking(move || library::scan_source(source, &paths)).await {
+                    app.parts.write().unwrap().insert(source.to_string(), part);
+                }
+                app.pending.write().unwrap().remove(source);
+                app.publish_library();
+            }));
+        }
+        if let Ok(mut found) = detect.await {
+            let mut g = self.detected.write().unwrap();
+            for (id, d) in found.iter_mut() {
+                d.reachable = g.get(id).and_then(|old| old.reachable);
+            }
+            *g = found;
         }
         self.refresh_attached().await;
+        for read in reads {
+            let _ = read.await;
+        }
+        // on the very first run, take over what uzu Home or TensorFold Home had selected
+        if self.first_run.swap(false, Ordering::Relaxed) && self.import_external && !self.config().selection.is_set() {
+            let lib = self.library.read().unwrap().clone();
+            let mut cfg = self.config();
+            if let Some(sel) = crate::import::selection_from_home_apps(&lib, &mut cfg) {
+                eprintln!("8gent: first run: taking over {} on {} from the Home app", sel.model, sel.loader);
+                let mut g = self.cfg.write().unwrap();
+                if !g.selection.is_set() {
+                    g.loaders = cfg.loaders;
+                    g.selection = sel;
+                    let _ = g.save(&self.paths);
+                }
+            }
+        }
     }
 
     /// The loaders that can run `model` here, in the order of the loader list.
@@ -282,7 +362,18 @@ impl App {
                 if !restored {
                     self.engine.mark_stopped();
                 }
-                let mut body = error_body(format!("{reason} 8gent went back to {} on {}.", previous.model, previous.loader), "switch_failed", Some("switch_rolled_back"));
+                // the sentence first; the engine's own last output, if any, goes in `detail`
+                let (head, detail) = reason.split_once("\n\n").unwrap_or((&reason, ""));
+                let went_back = if previous.is_set() {
+                    let lib = self.library.read().unwrap();
+                    let model = lib.get(&previous.model).map(|m| m.name.clone()).unwrap_or(previous.model.clone());
+                    let loader = self.manifest(&previous.loader).map(|m| m.name.clone()).unwrap_or(previous.loader.clone());
+                    format!(" 8gent went back to {model} on {loader}.")
+                } else {
+                    String::new()
+                };
+                let mut body = error_body(format!("{head}{went_back}"), "switch_failed", Some("switch_rolled_back"));
+                body["error"]["detail"] = json!(detail);
                 body["rolled_back"] = json!(true);
                 body["restored"] = json!(restored);
                 body["selection"] = json!(previous);
@@ -371,12 +462,13 @@ impl App {
     /// loader keeps has its own).
     fn estimate(build: &Build, context: u32, sessions: u32) -> Option<u64> {
         let kv = build.kv_bytes_per_token? * context as u64 * sessions.max(1) as u64;
-        Some(build.size_bytes? + 1_100_000_000 + kv)
+        Some(build.size_bytes? + RUNTIME_BYTES + kv)
     }
 
     pub fn models_payload(&self) -> Value {
         let cfg = self.config();
         let lib = self.library.read().unwrap().clone();
+        let running = self.engine.current();
         let rows: Vec<Value> = lib
             .models
             .iter()
@@ -388,13 +480,24 @@ impl App {
                         let build = engine::build_for(&lib, &model.id, m)?;
                         let sel = Selection { loader: m.id.clone(), model: model.id.clone(), context: 0, thinking: false };
                         let plan = self.plan(&sel);
-                        let context = engine::default_context(build);
-                        let sessions = cfg.loader(&m.id).sessions.unwrap_or(1);
+                        // the window this pair would load with: remembered for the model, else the default
+                        let context = plan.as_ref().map(|p| p.context).unwrap_or_else(|_| engine::default_context(build));
+                        let sessions = cfg.loader(&m.id).sessions.unwrap_or(if m.capabilities.sessions > 0 { 1 } else { 0 }).max(1);
+                        let managed = m.kind == Kind::Managed;
+                        let version = self.loader_version(&m.id);
                         Some(json!({
-                            "id": m.id, "name": m.name, "runnable": plan.is_ok(), "why_not": plan.err(),
+                            "id": m.id, "name": m.name, "kind": m.kind, "version": version,
+                            "runnable": plan.is_ok(), "why_not": plan.err(),
+                            "serving": running.as_ref().is_some_and(|r| r.loader == m.id && r.model == model.id),
+                            "selected": cfg.selection.loader == m.id && cfg.selection.model == model.id,
                             "format": build.format, "quant": build.quant, "variant": build.variant, "size_bytes": build.size_bytes,
-                            "default_context": context, "max_context": build.max_context,
-                            "estimated_memory_bytes": Self::estimate(build, context, sessions),
+                            "context": if managed { Some(context) } else { None }, "max_context": build.max_context,
+                            // memory = base + kv x window x conversations, so a client can price any window
+                            "base_bytes": build.size_bytes.filter(|_| managed).map(|b| b + RUNTIME_BYTES),
+                            "kv_bytes_per_token": build.kv_bytes_per_token.filter(|_| managed), "sessions": sessions,
+                            "estimated_memory_bytes": Self::estimate(build, context, sessions).filter(|_| managed),
+                            "capabilities": m.capabilities,
+                            "speed": self.stats.speed_for(&m.id, &model.id),
                         }))
                     })
                     .collect();
@@ -414,6 +517,9 @@ impl App {
             "name": "8gent", "version": crate::VERSION, "platform": manifest::platform(), "os_version": self.os_version,
             "port": cfg.port, "share": cfg.share, "key_set": cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
             "served_name": cfg.served_name, "memory_mode": cfg.memory_mode, "idle_minutes": cfg.idle_minutes, "auto_switch": cfg.auto_switch,
+            "home": self.paths.home.to_string_lossy(),
+            "scanning": self.pending.read().unwrap().iter().collect::<Vec<_>>(),
+            "also_loaded": self.also_loaded.read().unwrap().iter().map(|app| json!({"app": app, "detail": "has a model loaded"})).collect::<Vec<_>>(),
             "uptime_s": self.started.elapsed().as_secs(),
             "idle_s": now().saturating_sub(self.last_activity.load(Ordering::Relaxed)),
             "selection": cfg.selection,
@@ -468,10 +574,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/8gent/v1/loaders", get(loaders))
         .route("/8gent/v1/models", get(library_models))
         .route("/8gent/v1/logs", get(logs))
+        .route("/8gent/v1/requests", get(requests))
+        .route("/8gent/v1/settings", post(settings))
         .route("/8gent/v1/select", post(select))
         .route("/8gent/v1/engine/start", post(engine_start))
         .route("/8gent/v1/engine/stop", post(engine_stop))
         .route("/8gent/v1/rescan", post(rescan))
+        .route("/8gent/v1/shutdown", post(shutdown))
         .fallback(forward)
         .layer(DefaultBodyLimit::disable())
         .with_state(app)
@@ -535,6 +644,36 @@ async fn logs(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, heade
     Ok(Json(json!({"loader": loader, "lines": all[all.len().saturating_sub(lines)..]})))
 }
 
+async fn requests(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<BTreeMap<String, String>>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let limit: usize = q.get("limit").and_then(|n| n.parse().ok()).unwrap_or(100).min(200);
+    Ok(Json(json!({"requests": app.stats.recent(limit)})))
+}
+
+/// Change how the service behaves: `{memory_mode?, idle_minutes?, auto_switch?}`. Saved at once.
+async fn settings(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let mut cfg = app.config();
+    if let Some(mode) = body.get("memory_mode") {
+        cfg.memory_mode = serde_json::from_value(mode.clone()).map_err(|_| ApiErr::bad_request("memory_mode is always, idle or on_demand."))?;
+    }
+    if let Some(minutes) = body.get("idle_minutes") {
+        cfg.idle_minutes = minutes.as_f64().filter(|m| *m >= 0.0 && *m <= 24.0 * 60.0).ok_or_else(|| ApiErr::bad_request("idle_minutes is a number of minutes, 0 for never."))?;
+    }
+    if let Some(auto) = body.get("auto_switch") {
+        cfg.auto_switch = auto.as_bool().ok_or_else(|| ApiErr::bad_request("auto_switch is true or false."))?;
+    }
+    cfg.save(&app.paths).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None))?;
+    // the selection may have changed while this request was read: keep the live one
+    let mut g = app.cfg.write().unwrap();
+    let (selection, contexts) = (g.selection.clone(), g.contexts.clone());
+    *g = cfg;
+    g.selection = selection;
+    g.contexts = contexts;
+    let _ = g.save(&app.paths);
+    Ok(Json(json!({"ok": true, "memory_mode": g.memory_mode, "idle_minutes": g.idle_minutes, "auto_switch": g.auto_switch})))
+}
+
 async fn select(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, ApiErr> {
     authorize(&app, &remote, &headers, true)?;
     let current = app.config().selection;
@@ -582,8 +721,20 @@ async fn engine_stop(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>
 
 async fn rescan(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
     authorize(&app, &remote, &headers, true)?;
-    app.rescan().await;
-    Ok(Json(json!({"ok": true, "models": app.library.read().unwrap().models.len()})))
+    // a place that is waiting for a permission answer must not hold this call: report it instead
+    let _ = tokio::time::timeout(Duration::from_secs(10), app.rescan()).await;
+    let still: Vec<String> = app.pending.read().unwrap().iter().cloned().collect();
+    Ok(Json(json!({"ok": true, "models": app.library.read().unwrap().models.len(), "still_reading": still})))
+}
+
+/// Stop the service (and with it the engine). The answer goes out first.
+async fn shutdown(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        app.quit.notify_waiters();
+    });
+    Ok(Json(json!({"ok": true})))
 }
 
 /// Everything else under /v1 goes to the engine; other paths do not exist.
@@ -602,6 +753,10 @@ async fn forward(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, me
 /// Run the service on `listener` until `shutdown` resolves, then stop the engine.
 pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), String> {
     tokio::spawn(app.clone().housekeeping());
+    if !app.scan_begun.load(Ordering::Relaxed) {
+        let looking = app.clone();
+        tokio::spawn(async move { looking.rescan().await });
+    }
     if app.config().memory_mode == MemoryMode::Always && app.config().selection.is_set() {
         let a = app.clone();
         tokio::spawn(async move {
@@ -611,7 +766,14 @@ pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: i
             }
         });
     }
-    let result = axum::serve(listener, router(app.clone()).into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown).await;
+    let asked = app.clone();
+    let stop = async move {
+        tokio::select! {
+            _ = shutdown => {}
+            _ = asked.quit.notified() => {}
+        }
+    };
+    let result = axum::serve(listener, router(app.clone()).into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(stop).await;
     app.engine.stop().await;
     result.map_err(|e| e.to_string())
 }

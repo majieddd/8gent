@@ -38,7 +38,7 @@ this repository and covered by the tests described under [Testing](#testing).
 
 The service is the product. The app, the command line and kr8 are clients of its control API, so
 anything one of them can do, the others can too. **Built:** the service and the command line.
-**Planned:** the app.
+**Partly built:** the app.
 
 ## Loaders
 
@@ -157,8 +157,15 @@ sending headers before the engine has answered at all; shared sampling defaults.
 | `GET /models` | every model: the loaders that can run it (and why not, in words), size, default and longest context, estimated memory |
 | `POST /select` | `{loader?, model?, context?, thinking?, load?}`: change the selection |
 | `POST /engine/start`, `/engine/stop` | load or unload the selected model |
+| `GET /requests?limit=` | the latest requests, newest first |
 | `GET /logs?loader=&lines=` | the engine's own output |
-| `POST /rescan` | look again for loaders and models |
+| `POST /settings` | `{memory_mode?, idle_minutes?, auto_switch?}`, saved at once |
+| `POST /rescan` | look again for loaders and models; says which places have not answered yet |
+| `POST /shutdown` | stop the service and its engine |
+
+`/models` gives, for every model and loader pair, what a client needs to price any context window
+itself (`base_bytes + kv_bytes_per_token x window x sessions`) and the speed measured so far.
+Speeds are read back from the request log when the service starts, so they survive a restart.
 
 ### Selecting
 
@@ -183,6 +190,18 @@ computer into swap, counting what Ollama, LM Studio and other apps hold); measur
 engine's peak to correct the estimate, as uzu Home 0.1.2 does; a second slot for a small always-on
 model next to the main one.
 
+### Starting
+
+The service answers as soon as it has its port: it reads no model folder and runs no other program
+before that. Looking for loaders and models happens in the background, and each place models are
+read from is read on its own. This matters on macOS, which stops a program that opens a protected
+folder (Documents, Desktop, Downloads) until the person has answered its permission question: a
+place that is waiting stays listed under `scanning` in the status, and everything else is there
+meanwhile. (The first version waited for the whole scan and sat silent behind that question.)
+
+The status also names other apps that have a model loaded (`also_loaded`: uzu Home, TensorFold
+Home), because two loaded models share one computer's memory.
+
 ## Command line
 
 **Built.** `8gent serve` runs the service; `status`, `loaders`, `models`, `use <model> [--loader]
@@ -198,7 +217,7 @@ its context window and number of conversations. Nothing is loaded until a reques
 
 ## Testing
 
-`cargo test` runs 16 unit tests and 15 conformance tests. The conformance tests start the real
+`cargo test` runs 17 unit tests and 15 conformance tests. The conformance tests start the real
 service on a spare port, with its own data folder, against `mock-engine`: a stand-in engine whose
 quirks are switched on by flags (strict roles, errors inside 200 answers, compact stream lines, slow
 prompt reads, a model that will not load). They cover the model list, waking, names, streams and
@@ -210,23 +229,36 @@ A new loader is accepted when the same behaviours hold against the real engine. 
 for llama.cpp, TensorFold, uzu and Ollama; **planned:** a `8gent check <loader>` command that runs
 them.
 
-## The app (planned)
+## The app
 
-Tauri 2 with React, Tailwind and shadcn, the stack kr8's desktop uses, reading only the control API.
+**Partly built**, in `app/`: Tauri 2 with React and Tailwind, the stack kr8's desktop uses. It reads
+only the control API (inside the window through one `api` command, so the service needs no CORS
+rules; in a browser, for development, through Vite's proxy). The direction chosen from three
+mock-ups: the model-first screen, with a Home tab that shows what is serving now.
 
-- **Look:** kr8's tokens, not an imitation of them: the neutral GitHub-derived palette with
+- **Look:** kr8's values, not an imitation of them: the neutral GitHub-derived palette with
   near-black or near-white primary buttons, Inter and JetBrains Mono, 10 px corners and hairline
   borders, lucide icons, the violet sidebar gradient (`#ececf0` to `#e3dcf9` light, `#0a0a0e` to
-  `#110e30` dark), kr8's motion timings, and the rainbow "8" as the mark.
-- **Choosing is the main screen.** Pick a model; its loaders appear as cards with measured speed,
-  estimated memory against this computer's budget, and what each can do (tools, JSON schema,
-  pictures, several conversations). One press switches, with the going-back behaviour above shown
-  as it happens.
-- **Everything the Home apps had:** Chat, Monitor, Requests, Logs, the context window editor,
-  server controls, updates, sharing on the network with a key.
-- **New:** a loader page (installed, version, update, requirements such as "needs macOS 26.4"),
-  "race the loaders" (the same prompts through each loader that can run a model, to fill the speed
-  table), profiles (a named loader + model + window + thinking mode, selectable as a model name).
+  `#110e30` dark), kr8's motion timings, and the rainbow "8" as the mark. Light and dark follow the
+  system.
+- **The window starts the service** if it is not running (the service program is inside the app)
+  and leaves it running when the window closes, so the endpoint stays up.
+
+| Screen | State |
+|---|---|
+| Home | built: what is serving (or selected), speed, memory against this computer's limit, requests answered, load and unload, the "prompts did not fit, use a larger window" offer, the latest requests, a warning when a Home app has a model loaded too |
+| Models | built: the list (models 8gent loads itself first, ones only another app serves after), and for the picked model a card per loader with measured speed, memory at the chosen window, size on disk, what it can do, what it needs (for example macOS 26.4), and Switch; a failed switch shows the engine's reason and that 8gent went back |
+| Loaders | built: each loader's state, version, formats, capabilities and requirements; "Look again" |
+| Requests | built: the latest 200 with tokens, time to first token, speed and result |
+| Logs | built: each engine's own output, following the newest line |
+| Settings | built: memory mode and idle time, whether requests may switch models, theme, the endpoint address, stopping the service |
+| Chat, Monitor | planned (the Home apps had both) |
+| Race the loaders, profiles, loader install and update | planned |
+
+Checked by hand in a browser and as the built Mac app, against real engines: loading, switching
+from llama.cpp to TensorFold, and a switch to a model whose file is missing (the app showed
+llama.cpp's own reason and that 8gent went back to what was running). Not yet covered by automated
+tests; not yet built or run on Windows or Linux.
 
 ## kr8
 
@@ -251,7 +283,7 @@ is built; the loader work comes first.
 
 ## Next steps
 
-1. The app: design direction as mock-ups, then the choosing screen, status and logs.
+1. The app: Chat and Monitor, then a signed build with its own updates.
 2. Engine install and update, starting with the uzu and TensorFold paths the Home apps have.
 3. Peak-memory measurement and the memory budget.
 4. Windows and Linux builds, with a job object on Windows so an engine never outlives the service.

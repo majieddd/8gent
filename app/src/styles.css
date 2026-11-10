@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* kr8's default look: the neutral GitHub Light / Dark palette its "buzz" themes compute at runtime,
+   and the violet gradient it paints across the window chrome. */
+:root {
+  --bg: #ffffff; --card: #ffffff; --fg: #24292e; --muted: #626a74; --border: #e5e5e6; --soft: #f0f0f0;
+  --chrome1: #ececf0; --chrome2: #e3dcf9; --chrome-fg: #24292e; --chrome-muted: rgba(0, 0, 0, 0.62); --chrome-sel: rgba(0, 0, 0, 0.07);
+  --primary: #24292e; --on-primary: #ffffff; --ok: #1a7f37; --warn: #8a5d00; --bad: #cb2431; --accent: #5b46d6; --track: #e5e5e6;
+  color-scheme: light;
+}
+:root.dark {
+  --bg: #1a1a1a; --card: #24292e; --fg: #e1e4e8; --muted: #9ea4aa; --border: #40454a; --soft: #31363b;
+  --chrome1: #0a0a0e; --chrome2: #110e30; --chrome-fg: #e1e4e8; --chrome-muted: rgba(255, 255, 255, 0.62); --chrome-sel: rgba(255, 255, 255, 0.16);
+  --primary: #e1e4e8; --on-primary: #24292e; --ok: #34d058; --warn: #d29922; --bad: #ea4a5a; --accent: #9a83f3; --track: #40454a;
+  color-scheme: dark;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-synthesis-weight: none;
+  font-variant-ligatures: no-contextual;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+button { font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chrome { background: linear-gradient(180deg, var(--chrome1), var(--chrome2)); color: var(--chrome-fg); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
+}

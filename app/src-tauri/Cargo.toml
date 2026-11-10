@@ -1,0 +1,27 @@
+[package]
+name = "eightgent-app"
+version = "0.1.0"
+edition = "2024"
+description = "The 8gent window: a client of the 8gent service"
+license = "MIT"
+
+[[bin]]
+name = "8gent-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+eightgent = { path = "../.." }
+reqwest = { version = "0.12", default-features = false }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["time"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+strip = true
