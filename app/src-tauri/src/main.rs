@@ -135,6 +135,12 @@ async fn start(app: &tauri::AppHandle, client: &reqwest::Client) -> Result<Strin
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // Windows: no console window, and not tied to this one
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000 | 0x0000_0008); // CREATE_NO_WINDOW | DETACHED_PROCESS
+    }
     command.spawn().map_err(|e| format!("{} could not be started: {e}", program.display()))?;
     for _ in 0..80 {
         tokio::time::sleep(Duration::from_millis(250)).await;

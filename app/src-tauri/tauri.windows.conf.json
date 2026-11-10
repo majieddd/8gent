@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "resources": {
+      "../../target/release/8gent.exe": "bin/8gent.exe"
+    }
+  }
+}

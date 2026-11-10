@@ -1,0 +1,89 @@
+name: Build
+
+# The service program and the app for macOS, Windows and Linux. Runs by hand, and for every version
+# tag (vX.Y.Z), where the files are attached to a draft release for a person to look over and publish.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS (Apple Silicon), os: macos-latest, id: macos-arm64 }
+          - { name: Windows, os: windows-latest, id: windows-x64 }
+          - { name: Linux, os: ubuntu-22.04, id: linux-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            app/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: What the Linux window needs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - name: The service program
+        run: cargo build --release
+
+      - name: The app
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build
+
+      - name: Collect the files
+        shell: bash
+        run: |
+          mkdir -p out
+          V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          B=app/src-tauri/target/release/bundle
+          case "${{ matrix.id }}" in
+            macos-arm64)
+              tar -czf "out/8gent-service-$V-${{ matrix.id }}.tar.gz" -C target/release 8gent
+              ditto -c -k --keepParent "$B/macos/8gent.app" "out/8gent-$V-${{ matrix.id }}.app.zip"
+              cp "$B"/dmg/*.dmg "out/8gent-$V-${{ matrix.id }}.dmg"
+              ;;
+            windows-x64)
+              (cd target/release && 7z a "../../out/8gent-service-$V-${{ matrix.id }}.zip" 8gent.exe >/dev/null)
+              cp "$B"/nsis/*-setup.exe "out/8gent-$V-${{ matrix.id }}-setup.exe"
+              ;;
+            linux-x64)
+              tar -czf "out/8gent-service-$V-${{ matrix.id }}.tar.gz" -C target/release 8gent
+              cp "$B"/appimage/*.AppImage "out/8gent-$V-${{ matrix.id }}.AppImage"
+              cp "$B"/deb/*.deb "out/8gent-$V-${{ matrix.id }}.deb"
+              ;;
+          esac
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 8gent-${{ matrix.id }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Attach to a draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --title "8gent ${GITHUB_REF_NAME#v}" --notes "Draft: notes to be written before publishing."
+          gh release upload "$GITHUB_REF_NAME" out/* --clobber
