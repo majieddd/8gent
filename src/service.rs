@@ -158,7 +158,8 @@ mod tests {
         assert!(text.contains("<string>/Applications/8gent.app/Contents/Resources/bin/8gent</string><string>serve</string>"));
         assert!(text.contains("<key>SuccessfulExit</key><false/>"));
         assert!(text.contains("<key>ProcessType</key><string>Interactive</string>"));
-        assert!(text.contains("/tmp/8gent &amp; co/logs/service.log"), "paths are escaped for XML");
+        // (the separator differs by system; the agent itself is macOS only)
+        assert!(text.contains("8gent &amp; co") && text.contains("service.log") && !text.contains("8gent & co"), "paths are escaped for XML");
         assert!(text.contains("/opt/homebrew/bin"), "engines installed with Homebrew are found");
     }
 }
