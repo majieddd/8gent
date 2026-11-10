@@ -19,5 +19,6 @@ pub mod proxy;
 pub mod server;
 pub mod service;
 pub mod stats;
+pub mod updates;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

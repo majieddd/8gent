@@ -73,6 +73,12 @@ ref = "gamma-weights"
 "#;
 
 async fn service_with(config: &str) -> Service {
+    service_started(config, true).await
+}
+
+/// `scanned`: the model list is read before the service starts (false: in the background, as the
+/// real service does).
+async fn service_started(config: &str, scanned: bool) -> Service {
     let home = std::env::temp_dir().join(format!("8gent-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join("loaders")).unwrap();
@@ -83,7 +89,7 @@ async fn service_with(config: &str) -> Service {
     std::fs::write(home.join("config.toml"), config).unwrap();
     let mut opts = Options::new(Paths::at(&home));
     opts.import_external = false;
-    opts.wait_for_scan = true;
+    opts.wait_for_scan = scanned;
     opts.housekeeping_every = Duration::from_millis(200);
     let app = App::build(opts).await.unwrap();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -331,6 +337,18 @@ async fn an_idle_model_is_unloaded_and_the_next_request_loads_it_again() {
 }
 
 #[tokio::test]
+async fn a_model_kept_loaded_is_loaded_when_the_service_starts() {
+    // the model list is still being read when the service starts: the load waits for it
+    let s = service_started("memory_mode = \"always\"\n[selection]\nloader = \"mocka\"\nmodel = \"alpha\"\n", false).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while s.status().await["engine"]["state"] != "ready" {
+        assert!(Instant::now() < deadline, "not loaded 10 s after starting: {}", s.status().await["engine"]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(s.status().await["engine"]["running"]["model"], "alpha");
+}
+
+#[tokio::test]
 async fn keep_loaded_mode_does_not_unload() {
     let s = service_with("idle_minutes = 0.02\nmemory_mode = \"on_demand\"\n[selection]\nloader = \"mocka\"\nmodel = \"alpha\"\n").await;
     s.chat("8gent", "hi").await;
@@ -380,6 +398,10 @@ async fn stop_and_start_and_the_lists() {
     // settings are saved and answered back; nonsense is refused
     let (code, v) = s.post("/8gent/v1/settings", json!({"memory_mode": "on_demand", "idle_minutes": 10, "auto_switch": false})).await;
     assert_eq!((code, v["memory_mode"].as_str(), v["idle_minutes"].as_f64(), v["auto_switch"].as_bool()), (200, Some("on_demand"), Some(10.0), Some(false)), "{v}");
+    // updates: a loader its own app updates is refused; an unknown one too; the list answers
+    assert_eq!(s.post("/8gent/v1/loaders/ollama/update", json!({})).await.0, 400);
+    assert_eq!(s.post("/8gent/v1/loaders/ghost/update", json!({})).await.0, 400);
+    assert_eq!(s.get("/8gent/v1/updates").await.1["auto_update"], true);
     assert_eq!(s.status().await["memory_mode"], "on_demand");
     assert!(std::fs::read_to_string(s.home.join("config.toml")).unwrap().contains("memory_mode = \"on_demand\""));
     assert_eq!(s.post("/8gent/v1/settings", json!({"memory_mode": "sometimes"})).await.0, 400);

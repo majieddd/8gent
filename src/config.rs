@@ -38,6 +38,8 @@ pub struct Config {
     pub idle_minutes: f64,
     /// A request that names another model or loader switches to it.
     pub auto_switch: bool,
+    /// Install newer engines by itself, once a day, when nothing has been asked for a while.
+    pub auto_update: bool,
     pub selection: Selection,
     /// The context window last chosen for each model, used again whenever the model is selected
     /// without naming one.
@@ -56,6 +58,7 @@ impl Default for Config {
             memory_mode: MemoryMode::Idle,
             idle_minutes: 30.0,
             auto_switch: true,
+            auto_update: true,
             selection: Selection::default(),
             contexts: BTreeMap::new(),
             loaders: BTreeMap::new(),

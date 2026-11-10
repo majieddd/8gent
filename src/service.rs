@@ -88,8 +88,27 @@ pub fn write(program: &Path, paths: &Paths) -> Result<(), String> {
 pub fn load() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let _ = launchctl(&["bootout", &format!("{}/{LABEL}", domain())]);
-        launchctl(&["bootstrap", &domain(), &plist_path().to_string_lossy()]).map(|_| ())
+        let job = format!("{}/{LABEL}", domain());
+        // a job from an earlier install has to be gone before the new one is taken; launchd lets go
+        // of it a moment after being told to, and refuses the new one until then
+        if launchctl(&["print", &job]).is_ok() {
+            let _ = launchctl(&["bootout", &job]);
+            for _ in 0..40 {
+                if launchctl(&["print", &job]).is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        let mut last = String::new();
+        for _ in 0..8 {
+            match launchctl(&["bootstrap", &domain(), &plist_path().to_string_lossy()]) {
+                Ok(_) => return Ok(()),
+                Err(e) => last = e,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Err(format!("macOS did not take the login item: {last}"))
     }
     #[cfg(not(target_os = "macos"))]
     Err("Starting at login is not set up for this system yet.".into())

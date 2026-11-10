@@ -72,6 +72,15 @@ export function Settings({ svc, status, theme, setTheme, endpoint }: { svc: Serv
       </section>
 
       <section className="flex flex-col gap-2">
+        <Label>Loaders</Label>
+        <Card>
+          <Row title="Update loaders automatically" hint="Once a day 8gent looks for newer engines and installs them when nothing has been asked for half an hour. The model is unloaded for an update and loaded again after it.">
+            <Switch on={status.auto_update} onChange={(auto_update) => save({ auto_update })} label="Update loaders automatically" />
+          </Row>
+        </Card>
+      </section>
+
+      <section className="flex flex-col gap-2">
         <Label>Endpoint</Label>
         <Card className="divide-y divide-line">
           <Row title="Address" hint={`For Hermes, kr8 and any OpenAI client. The model name "${status.served_name}", or any name 8gent does not know, means whatever is selected.`}>

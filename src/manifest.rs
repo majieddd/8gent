@@ -194,9 +194,20 @@ pub struct Requirement {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Update {
-    /// "brew", "github", "app" (the engine's own app updates it) or "none".
+    /// "brew", "github-prebuilt", "app" (the engine's own app updates it) or "none".
     pub method: String,
+    /// The Homebrew formula, or the GitHub repository whose releases hold ready-made engines.
     pub source: String,
+    /// github-prebuilt: the repository whose tags are the engine's versions.
+    pub upstream: String,
+    /// github-prebuilt: the release file's name; {version} and {platform} are filled in.
+    pub asset: String,
+    /// github-prebuilt: where 8gent keeps the engine it installs, and the program's name in it.
+    pub install_dir: String,
+    pub binary: String,
+    /// github-prebuilt: arguments that make the engine print its options, and what must be among them.
+    pub verify_args: Vec<String>,
+    pub verify_contains: Vec<String>,
 }
 
 impl Manifest {

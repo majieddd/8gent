@@ -71,6 +71,8 @@ pub struct App {
     pub quit: tokio::sync::Notify,
     /// The extra ports that are answering right now.
     pub aliases: RwLock<Vec<u16>>,
+    /// What the last look for newer engines found, by loader.
+    updates: RwLock<BTreeMap<String, crate::updates::UpdateState>>,
     /// Pieces of answers written since the service started; the monitor reads its rate.
     pub live_tokens: AtomicU64,
     /// One sample a second for the Monitor screen, the last three minutes.
@@ -161,6 +163,7 @@ impl App {
             also_loaded: RwLock::new(vec![]),
             quit: tokio::sync::Notify::new(),
             aliases: RwLock::new(vec![]),
+            updates: RwLock::new(BTreeMap::new()),
             live_tokens: AtomicU64::new(0),
             monitor: std::sync::Mutex::new(std::collections::VecDeque::new()),
             last_activity: AtomicU64::new(now()),
@@ -426,6 +429,118 @@ impl App {
         g.save(&self.paths).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None))
     }
 
+    /// Look for newer engines for every loader 8gent can update on this computer.
+    pub async fn check_updates(&self) {
+        let detected = self.detected.read().unwrap().clone();
+        for m in self.manifests.iter().filter(|m| m.supports_platform() && !m.update.method.is_empty() && m.update.method != "none") {
+            let (m2, os) = (m.clone(), self.os_version.clone());
+            let installed = detected.get(&m.id).filter(|d| d.program.is_some()).and_then(|d| d.version.clone());
+            let program_found = detected.get(&m.id).is_some_and(|d| d.program.is_some());
+            let Ok(mut found) = tokio::task::spawn_blocking(move || crate::updates::check(&m2, installed.as_deref(), &os)).await else { continue };
+            // an engine that is installed but tells no version (or one from another place) is not "not installed"
+            if found.status == "not_installed" && program_found {
+                found.status = "available".into();
+            }
+            let mut g = self.updates.write().unwrap();
+            if let Some(old) = g.get(&m.id) {
+                found.busy = old.busy;
+                found.last_result = old.last_result.clone();
+            }
+            g.insert(m.id.clone(), found);
+        }
+    }
+
+    fn note_update(&self, loader: &str, busy: bool, result: Option<String>) {
+        let mut g = self.updates.write().unwrap();
+        let s = g.entry(loader.to_string()).or_insert_with(|| crate::updates::UpdateState { loader: loader.to_string(), status: "unknown".into(), ..Default::default() });
+        s.busy = busy;
+        if result.is_some() {
+            s.last_result = result;
+        }
+    }
+
+    /// Install the newest engine of one loader. If that loader is serving, the model is unloaded for
+    /// the update and loaded again after it; an engine that then fails to load is put back where the
+    /// loader keeps the one it replaced.
+    pub async fn update_loader(self: &Arc<Self>, id: &str) -> Result<String, String> {
+        let m = self.manifest(id).ok_or_else(|| format!("There is no loader called \"{id}\"."))?.clone();
+        if self.updates.read().unwrap().get(id).is_some_and(|s| s.busy) {
+            return Err(format!("{} is being updated already.", m.name));
+        }
+        self.note_update(id, true, None);
+        let outcome = self.update_loader_inner(&m).await;
+        let words = match &outcome {
+            Ok(version) => format!("Updated to {version}."),
+            Err(e) => e.clone(),
+        };
+        eprintln!("8gent: update of {}: {words}", m.id);
+        self.note_update(id, false, Some(words));
+        self.rescan_detect().await;
+        self.check_updates().await;
+        outcome
+    }
+
+    async fn update_loader_inner(self: &Arc<Self>, m: &Manifest) -> Result<String, String> {
+        let _alone = self.gate.clone().write_owned().await;
+        let was_serving = self.engine.current().filter(|r| r.loader == m.id);
+        if was_serving.is_some() {
+            self.engine.stop().await;
+            self.engine.mark_stopped();
+        }
+        let (m2, p, os) = (m.clone(), self.paths.clone(), self.os_version.clone());
+        let applied = tokio::task::spawn_blocking(move || crate::updates::apply(&m2, &p, &os)).await.map_err(|e| e.to_string())?;
+        self.rescan_detect().await;
+        let sel = self.config().selection;
+        let serving = was_serving.is_some();
+        let reload = |why: &'static str| {
+            let sel = sel.clone();
+            async move {
+                if !serving {
+                    return Ok(());
+                }
+                let plan = self.plan(&sel)?;
+                let version = self.loader_version(&plan.loader);
+                self.engine.start(plan, version).await.map(|_| ()).map_err(|e| format!("{why}: {e}"))
+            }
+        };
+        match applied {
+            Ok(version) => match reload("The new engine did not load the model").await {
+                Ok(()) => Ok(version),
+                Err(e) => {
+                    let (m3, p) = (m.clone(), self.paths.clone());
+                    let back = tokio::task::spawn_blocking(move || crate::updates::roll_back(&m3, &p)).await.unwrap_or(false);
+                    self.rescan_detect().await;
+                    let restored = back && reload("The previous engine did not load either").await.is_ok();
+                    self.engine.mark_stopped();
+                    Err(format!("{}{}", e.split("\n\n").next().unwrap_or(&e), if restored { " 8gent put the previous engine back, and it is serving again." } else if back { " 8gent put the previous engine back." } else { "" }))
+                }
+            },
+            Err(e) => {
+                // nothing was changed: carry on with the engine there was
+                let _ = reload("The engine did not load again").await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Find the loaders' programs and versions again (after an install or update).
+    async fn rescan_detect(&self) {
+        let (p, m, c) = (self.paths.clone(), self.manifests.clone(), self.config());
+        if let Ok(mut found) = tokio::task::spawn_blocking(move || engine::detect(&m, &c, &p)).await {
+            let mut g = self.detected.write().unwrap();
+            for (id, d) in found.iter_mut() {
+                d.reachable = g.get(id).and_then(|old| old.reachable);
+            }
+            *g = found;
+        }
+    }
+
+    pub fn updates_payload(&self) -> Value {
+        let g = self.updates.read().unwrap();
+        let rows: Vec<&crate::updates::UpdateState> = self.manifests.iter().filter_map(|m| g.get(&m.id)).collect();
+        json!({"updates": rows, "auto_update": self.config().auto_update})
+    }
+
     /// Once a second: how fast answers are being written, how many requests are in progress, and
     /// the memory the engine holds. Cheap: two counters and one system call.
     pub async fn sampler(self: Arc<Self>) {
@@ -450,8 +565,27 @@ impl App {
     /// Every few seconds: notice an engine that died, unload an idle one, refresh attached servers.
     pub async fn housekeeping(self: Arc<Self>) {
         let mut last_refresh = Instant::now();
+        // the first look for newer engines a minute after starting, then once a day
+        let mut next_update_check = Instant::now() + Duration::from_secs(60);
         loop {
             tokio::time::sleep(self.housekeeping_every).await;
+            if self.import_external && Instant::now() >= next_update_check {
+                next_update_check = Instant::now() + Duration::from_secs(24 * 3600);
+                let app = self.clone();
+                tokio::spawn(async move {
+                    app.check_updates().await;
+                    // install by itself only when nobody has asked anything for half an hour
+                    let quiet = || now().saturating_sub(app.last_activity.load(Ordering::Relaxed)) >= 1800 && app.stats.in_flight() == 0;
+                    if app.config().auto_update {
+                        let due: Vec<String> = app.updates.read().unwrap().values().filter(|u| u.status == "available").map(|u| u.loader.clone()).collect();
+                        for id in due {
+                            if quiet() {
+                                let _ = app.update_loader(&id).await;
+                            }
+                        }
+                    }
+                });
+            }
             let cfg = self.config();
             let running = self.engine.current();
             let idle_s = now().saturating_sub(self.last_activity.load(Ordering::Relaxed));
@@ -573,7 +707,7 @@ impl App {
             "name": "8gent", "version": crate::VERSION, "platform": manifest::platform(), "os_version": self.os_version,
             "port": cfg.port, "also_listening": self.aliases.read().unwrap().clone(), "also_listen": cfg.also_listen,
             "login_item": crate::service::installed(), "share": cfg.share, "key_set": cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
-            "served_name": cfg.served_name, "memory_mode": cfg.memory_mode, "idle_minutes": cfg.idle_minutes, "auto_switch": cfg.auto_switch,
+            "served_name": cfg.served_name, "memory_mode": cfg.memory_mode, "idle_minutes": cfg.idle_minutes, "auto_switch": cfg.auto_switch, "auto_update": cfg.auto_update,
             "home": self.paths.home.to_string_lossy(),
             "scanning": self.pending.read().unwrap().iter().collect::<Vec<_>>(),
             "also_loaded": self.also_loaded.read().unwrap().iter().map(|app| json!({"app": app, "detail": "has a model loaded"})).collect::<Vec<_>>(),
@@ -642,6 +776,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/8gent/v1/rescan", post(rescan))
         .route("/8gent/v1/shutdown", post(shutdown))
         .route("/8gent/v1/login-item", post(login_item))
+        .route("/8gent/v1/updates", get(updates))
+        .route("/8gent/v1/updates/check", post(updates_check))
+        .route("/8gent/v1/loaders/{id}/update", post(loader_update))
         .fallback(forward)
         .layer(DefaultBodyLimit::disable())
         .with_state(app)
@@ -790,6 +927,9 @@ async fn settings(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, h
     if let Some(auto) = body.get("auto_switch") {
         cfg.auto_switch = auto.as_bool().ok_or_else(|| ApiErr::bad_request("auto_switch is true or false."))?;
     }
+    if let Some(auto) = body.get("auto_update") {
+        cfg.auto_update = auto.as_bool().ok_or_else(|| ApiErr::bad_request("auto_update is true or false."))?;
+    }
     cfg.save(&app.paths).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None))?;
     // the selection may have changed while this request was read: keep the live one
     let mut g = app.cfg.write().unwrap();
@@ -798,7 +938,7 @@ async fn settings(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, h
     g.selection = selection;
     g.contexts = contexts;
     let _ = g.save(&app.paths);
-    Ok(Json(json!({"ok": true, "memory_mode": g.memory_mode, "idle_minutes": g.idle_minutes, "auto_switch": g.auto_switch})))
+    Ok(Json(json!({"ok": true, "memory_mode": g.memory_mode, "idle_minutes": g.idle_minutes, "auto_switch": g.auto_switch, "auto_update": g.auto_update})))
 }
 
 async fn select(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, ApiErr> {
@@ -864,6 +1004,34 @@ async fn shutdown(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, h
     Ok(Json(json!({"ok": true})))
 }
 
+async fn updates(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    Ok(Json(app.updates_payload()))
+}
+
+async fn updates_check(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let _ = tokio::time::timeout(Duration::from_secs(120), app.check_updates()).await;
+    Ok(Json(app.updates_payload()))
+}
+
+/// Install the newest engine of one loader. Answers at once; `/updates` shows it running and how it ended.
+async fn loader_update(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let m = app.manifest(&id).ok_or_else(|| ApiErr::bad_request(format!("There is no loader called \"{id}\".")))?;
+    if !matches!(m.update.method.as_str(), "brew" | "github-prebuilt") {
+        return Err(ApiErr::bad_request(format!("{} is updated by its own app, not by 8gent.", m.name)));
+    }
+    if app.updates.read().unwrap().get(&id).is_some_and(|s| s.busy) {
+        return Err(ApiErr::new(StatusCode::CONFLICT, format!("{} is being updated already.", m.name), "invalid_request_error", Some("busy")));
+    }
+    let running = app.clone();
+    tokio::spawn(async move {
+        let _ = running.update_loader(&id).await;
+    });
+    Ok(Json(json!({"ok": true, "started": true})))
+}
+
 /// Start at login, or stop doing so: `{enabled}`. Switching it on while the service was started some
 /// other way hands the service over to the login agent: this one stops and the agent's starts.
 async fn login_item(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, ApiErr> {
@@ -913,6 +1081,22 @@ pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: i
         let a = app.clone();
         tokio::spawn(async move {
             let sel = a.config().selection;
+            // the model list is read in the background: wait until this model is in it (up to ten
+            // minutes while a place is still being read, half a minute otherwise)
+            let began = Instant::now();
+            loop {
+                if a.library.read().unwrap().get(&sel.model).is_some() {
+                    break;
+                }
+                let reading = !a.scan_begun.load(Ordering::Relaxed) || !a.pending.read().unwrap().is_empty();
+                if began.elapsed() > Duration::from_secs(if reading { 600 } else { 30 }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            if a.config().selection != sel || a.engine.current().is_some() {
+                return; // something else was chosen or loaded meanwhile
+            }
             if let Err(e) = a.acquire(&sel).await {
                 eprintln!("8gent: could not load {} at start: {}", sel.model, normalize::error_message(&e.body).unwrap_or_default());
             }

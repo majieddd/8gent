@@ -54,7 +54,7 @@ export interface RequestRecord {
 }
 export interface Status {
   version: string; platform: string; os_version: string; port: number; also_listening: number[]; login_item: boolean; share: boolean; key_set: boolean; served_name: string; home: string;
-  memory_mode: "always" | "idle" | "on_demand"; idle_minutes: number; auto_switch: boolean; uptime_s: number; idle_s: number;
+  memory_mode: "always" | "idle" | "on_demand"; idle_minutes: number; auto_switch: boolean; auto_update: boolean; uptime_s: number; idle_s: number;
   selection: Selection;
   engine: { state: "stopped" | "loading" | "ready" | "error"; running: Running | null; memory_bytes: number | null; loading: { loader: string; model: string; seconds: number } | null; error: string | null };
   memory: { total_bytes: number | null; gpu_budget_bytes: number | null };
@@ -165,7 +165,16 @@ export async function streamChat(body: object, onEvent: (event: any) => void, si
   }
 }
 
+export interface UpdateState {
+  loader: string; current: string | null; latest: string | null;
+  status: "current" | "available" | "held" | "not_installed" | "elsewhere" | "unknown";
+  note: string; checked_at: number | null; busy: boolean; last_result: string | null;
+}
+
 export const api = {
+  updates: () => call<{ updates: UpdateState[]; auto_update: boolean }>("GET", "/8gent/v1/updates"),
+  checkUpdates: () => call<{ updates: UpdateState[]; auto_update: boolean }>("POST", "/8gent/v1/updates/check", {}),
+  updateLoader: (id: string) => call<{ ok: boolean }>("POST", `/8gent/v1/loaders/${id}/update`, {}),
   monitor: () => call<{ samples: Sample[]; gpu_budget_bytes: number | null; total_bytes: number | null }>("GET", "/8gent/v1/monitor"),
   chats: () => call<{ chats: ChatRow[] }>("GET", "/8gent/v1/chats"),
   chat: (id: string) => call<ChatDoc>("GET", `/8gent/v1/chats/${id}`),
@@ -180,7 +189,7 @@ export const api = {
   start: () => call<{ ok: boolean }>("POST", "/8gent/v1/engine/start", {}),
   stop: () => call<{ ok: boolean }>("POST", "/8gent/v1/engine/stop", {}),
   rescan: () => call<{ ok: boolean; models: number }>("POST", "/8gent/v1/rescan", {}),
-  settings: (body: Partial<Pick<Status, "memory_mode" | "idle_minutes" | "auto_switch">>) => call<{ ok: boolean }>("POST", "/8gent/v1/settings", body),
+  settings: (body: Partial<Pick<Status, "memory_mode" | "idle_minutes" | "auto_switch" | "auto_update">>) => call<{ ok: boolean }>("POST", "/8gent/v1/settings", body),
   shutdown: () => call<{ ok: boolean }>("POST", "/8gent/v1/shutdown", {}),
   loginItem: (enabled: boolean) => call<{ ok: boolean; restarting?: boolean }>("POST", "/8gent/v1/login-item", { enabled }),
   /** Start the service if it is not running (only the app can; a browser tab cannot start programs). */

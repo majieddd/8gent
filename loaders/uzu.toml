@@ -44,6 +44,14 @@ min = "26.4"
 since = "0.6.17"
 note = "On earlier macOS it only runs with the matrix units off, which reads prompts about 4x slower."
 
+# Versions are Mirai's tags; the engines 8gent installs are builds with uzu Home's patches (the
+# --context-length and --sessions options), published ready-made.
 [update]
-method = "github"
+method = "github-prebuilt"
+upstream = "trymirai/uzu"
 source = "majieddd/uzuhome"
+asset = "uzu-engine-{version}-{platform}.tar.gz"
+install_dir = "{data}/engines/uzu"
+binary = "uzu"
+verify_args = ["server", "--help"]
+verify_contains = ["--context-length", "--sessions"]

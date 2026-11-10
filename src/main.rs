@@ -17,6 +17,8 @@ const HELP: &str = "8gent: one local endpoint in front of any model loader
   8gent start | stop                  load or unload the selected model
   8gent logs [--loader L] [-n N]      the engine's own output
   8gent rescan                        look again for loaders and models
+  8gent updates [check]               newer engines that are available
+  8gent update <loader>               install a loader's newest engine
   8gent service install | uninstall | status
                                       start the service at login (and now), or stop doing so
 
@@ -169,6 +171,25 @@ async fn client(command: &str, args: &[String]) -> Result<(), String> {
             post("/engine/stop", json!({})).await?;
             println!("unloaded");
         }
+        "updates" => {
+            let v = if args.first().map(String::as_str) == Some("check") { post("/updates/check", json!({})).await? } else { get("/updates").await? };
+            print_updates(&v);
+        }
+        "update" => {
+            let loader = args.first().ok_or("usage: 8gent update <loader>")?;
+            post(&format!("/loaders/{loader}/update"), json!({})).await?;
+            println!("updating {loader}...");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let v = get("/updates").await?;
+                if let Some(u) = v["updates"].as_array().into_iter().flatten().find(|u| u["loader"] == loader.as_str()) {
+                    if u["busy"] != true {
+                        println!("{}", s(&u["last_result"]));
+                        break;
+                    }
+                }
+            }
+        }
         "rescan" => {
             let v = post("/rescan", json!({})).await?;
             println!("{} models", v["models"]);
@@ -270,6 +291,26 @@ fn print_status(v: &Value) {
         if let Some(tps) = sp["mean_tokens_per_second"].as_f64() {
             println!("speed      {} on {}: {tps:.1} tokens/s over {} requests", s(&sp["model"]), s(&sp["loader"]), sp["requests"]);
         }
+    }
+}
+
+fn print_updates(v: &Value) {
+    for u in v["updates"].as_array().into_iter().flatten() {
+        let line = match s(&u["status"]) {
+            "current" => format!("up to date ({})", s(&u["current"])),
+            "available" => format!("update available: {} -> {}", s(&u["current"]), s(&u["latest"])),
+            "held" => format!("{} is out, not installed here. {}", s(&u["latest"]), s(&u["note"])),
+            "not_installed" => format!("not installed. {}", s(&u["note"])),
+            "elsewhere" => s(&u["note"]).to_string(),
+            _ => s(&u["note"]).to_string(),
+        };
+        println!("  {:<11} {line}", s(&u["loader"]));
+        if let Some(r) = u["last_result"].as_str() {
+            println!("              last update: {r}");
+        }
+    }
+    if v["updates"].as_array().is_none_or(|a| a.is_empty()) {
+        println!("  not checked yet (8gent updates check)");
     }
 }
 

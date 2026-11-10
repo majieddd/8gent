@@ -9,8 +9,8 @@ kr8 family. This repository holds the service, its command line and the first ve
 What is built and what is planned is in [docs/DESIGN.md](docs/DESIGN.md).
 
 **Status: early.** The service runs and is tested with real models on llama.cpp, TensorFold, uzu
-and Ollama on an Apple Silicon Mac. It uses engines that are already installed; it does not install
-or update them yet. The app builds and runs on that Mac; there is no release yet, and nothing has
+and Ollama on an Apple Silicon Mac. It updates engines installed with Homebrew and installs uzu's
+ready-made engines; TensorFold's 0.6 line and building uzu from source still come from the Home apps. The app builds and runs on that Mac; there is no release yet, and nothing has
 been built on Windows or Linux.
 
 ## What it does today
@@ -22,6 +22,8 @@ been built on Windows or Linux.
   request with the model `uzu/qwythos-9b-v2`. If the new engine does not come up, 8gent goes back
   to what was running and tells you the engine's own reason.
 - **Loads on demand, unloads when idle**, and never leaves an engine behind when it stops.
+- **Keeps engines up to date.** Once a day it looks for a newer llama.cpp, TensorFold and uzu and
+  installs them when idle; a version that needs a newer macOS than you have is held, with the reason.
 - **Every loader behaves the same to clients:** the real context window in `/v1/models`, the
   standard `context_length_exceeded` error when a prompt does not fit (so agents compress and
   retry), thinking mode applied the way each engine takes it, histories repaired for engines that
@@ -129,7 +131,7 @@ format. Put your own in the `loaders` folder of 8gent's data folder.
 cargo test
 ```
 
-18 unit tests and 15 conformance tests. The conformance tests run the real service against
+22 unit tests and 16 conformance tests. The conformance tests run the real service against
 `mock-engine`, a stand-in engine that reproduces each loader's quirks without a model or a GPU.
 `npm test` in `app/` runs the app's logic tests.
 

@@ -95,10 +95,36 @@ since = "0.6.17"
 | LM Studio | attach | what LM Studio has loaded | built; not tested with its server running |
 | Strata | attach | Strata's packs | definition written; Strata is not installed on the development Mac, and its packs need 32 GB or more |
 
-**Planned for loaders:** installing and updating engines from 8gent (today it uses engines that are
-already installed, including the ones the Home apps installed); the uzu build-from-source and
-prebuilt-engine update path from uzu Home; load and unload commands and the real context window for
-attached servers (8gent cannot set Ollama's or LM Studio's window yet, and reports its own default).
+### Updating and installing engines
+
+**Built** for two kinds of loader, named in a loader's `[update]`:
+
+- `brew`: the engine is a Homebrew formula (llama.cpp, TensorFold). Homebrew says whether it is
+  outdated (its own judgement: llama.cpp's version went from 8680 to 0.9.0) and upgrades or installs it.
+- `github-prebuilt`: versions are one repository's tags, ready-made engines another's release files
+  (uzu: Mirai's tags, builds with uzu Home's patches). A download must match the SHA-256 GitHub
+  publishes for it, run on this computer and offer the options 8gent's start line uses. It is
+  installed into 8gent's own folder and the engine it replaces is kept.
+
+Before anything is downloaded, a loader's `[[requires]]` is applied: a version that needs a newer OS
+than this computer has is **held**, with the reason (uzu 0.6.17 waits for macOS 26.4).
+
+If the loader is serving, the model is unloaded for the update and loaded again after it. A
+prebuilt engine that then fails to load the model is replaced by the one it replaced, and that is
+loaded again. 8gent looks for updates a minute after starting and once a day, and with
+`auto_update` (on by default, Settings > Update loaders automatically) installs them when nothing
+has been asked for half an hour. `8gent updates`, `8gent update <loader>` and the Loaders screen do
+the same by hand.
+
+Checked for real: llama.cpp upgraded from 8680 to 0.9.0 through 8gent, with a model loaded
+(unloaded, upgraded, loaded again, answering); the prebuilt uzu 0.6.17 engine downloaded, verified
+and installed into a test folder. Not yet exercised for real: going back after a prebuilt engine
+fails to load.
+
+**Planned for loaders:** building uzu from source when no ready-made engine fits, and TensorFold's
+0.6 line, inside 8gent's own folder (both still come from the Home apps' folders); load and unload
+commands and the real context window for attached servers (8gent cannot set Ollama's or LM
+Studio's window yet, and reports its own default).
 
 ## Model library
 
@@ -173,6 +199,8 @@ sending headers before the engine has answered at all; shared sampling defaults.
 | `POST /rescan` | look again for loaders and models; says which places have not answered yet |
 | `POST /shutdown` | stop the service and its engine |
 | `POST /login-item` | `{enabled}`: start at login or not (macOS: a launchd agent of the user) |
+| `GET /updates`, `POST /updates/check` | newer engines per loader: current, available, held (with the reason), or updated by its own app |
+| `POST /loaders/{id}/update` | install a loader's newest engine; `/updates` shows it running and how it ended |
 
 `/models` gives, for every model and loader pair, what a client needs to price any context window
 itself (`base_bytes + kv_bytes_per_token x window x sessions`) and the speed measured so far.
@@ -239,7 +267,7 @@ then `8gent service install`.
 
 ## Testing
 
-`cargo test` runs 18 unit tests and 15 conformance tests; `npm test` in `app/` runs the app's logic
+`cargo test` runs 22 unit tests and 16 conformance tests; `npm test` in `app/` runs the app's logic
 tests. GitHub runs the service tests on macOS, Linux and Windows, and the app's checks, on every push. The conformance tests start the real
 service on a spare port, with its own data folder, against `mock-engine`: a stand-in engine whose
 quirks are switched on by flags (strict roles, errors inside 200 answers, compact stream lines, slow
@@ -327,7 +355,8 @@ In the order agreed:
 1. ~~Chat (direct to the model) and Monitor screens.~~ Done.
 2. ~~Daily setup on a Mac: start at login, the Home apps' old ports, their settings taken over.~~
    Done (`8gent service install`, `also_listen`). Their request history is not imported.
-3. Engine install and update, starting with the uzu and TensorFold paths the Home apps have.
+3. ~~Engine install and update.~~ Done for Homebrew formulas and ready-made engines; building
+   from source and TensorFold's 0.6 line are still to move in.
 4. One memory budget, peak-memory measurement, and a second slot for a small always-on model.
 5. Releases with in-app updates (GitHub and a page on the kr8 site); the Home apps' repositories
    then point here.

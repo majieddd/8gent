@@ -168,7 +168,7 @@ export function App() {
           <div className="mx-auto flex max-w-[1180px] flex-col gap-6 px-8 pb-10 pt-7">
             {tab === "home" && <Home svc={svc} status={status} modelName={modelName} loaderName={loaderName} openModels={openModels} openRequests={() => setTab("requests")} />}
             {tab === "models" && <Models svc={svc} status={status} picked={picked} setPicked={setPicked} />}
-            {tab === "loaders" && <Loaders svc={svc} />}
+            {tab === "loaders" && <Loaders svc={svc} status={status} />}
             {tab === "monitor" && <Monitor status={status} modelName={modelName} loaderName={loaderName} />}
             {tab === "requests" && <Requests modelName={modelName} loaderName={loaderName} />}
             {tab === "logs" && <Logs svc={svc} status={status} />}
