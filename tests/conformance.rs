@@ -507,7 +507,8 @@ async fn a_harness_is_pointed_here_and_taken_off_again_with_a_copy_kept() {
     std::fs::create_dir_all(s.home.join("harnesses")).unwrap();
     std::fs::write(
         s.home.join("harnesses/scratch.toml"),
-        format!("id = \"scratch\"\nname = \"Scratch\"\n[detect]\nprograms = [\"{}\"]\n[connect]\nkind = \"opencode-json\"\nfile = \"{}\"\nuse = \"scratch run\"\n", std::env::current_exe().unwrap().display(), settings.display()),
+        // literal strings: a Windows path has backslashes
+        format!("id = \"scratch\"\nname = \"Scratch\"\n[detect]\nprograms = ['{}']\n[connect]\nkind = \"opencode-json\"\nfile = '{}'\nuse = \"scratch run\"\n", std::env::current_exe().unwrap().display(), settings.display()),
     )
     .unwrap();
     let find = |v: &Value, id: &str| v["harnesses"].as_array().unwrap().iter().find(|h| h["id"] == id).cloned().unwrap_or(Value::Null);

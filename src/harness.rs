@@ -606,7 +606,7 @@ pub fn disconnect(h: &Harness, ep: &Endpoint, paths: &Paths) -> Result<Written, 
 /// The harness's program on this computer, when it is installed.
 pub fn program(h: &Harness, paths: &Paths) -> Option<PathBuf> {
     h.detect.programs.iter().find_map(|p| {
-        if p.starts_with('~') || p.contains(std::path::MAIN_SEPARATOR) {
+        if p.starts_with('~') || p.contains(['/', '\\']) {
             paths::find_program(std::slice::from_ref(p), None, paths)
         } else {
             // a bare name: wherever the PATH has it (a login service's PATH is short, so the
@@ -847,7 +847,8 @@ mod tests {
     }
 
     fn harness(kind: &str, file: &Path) -> Harness {
-        toml::from_str(&format!("id = \"h\"\nname = \"H\"\n[connect]\nkind = \"{kind}\"\nfile = \"{}\"\n", file.display())).unwrap()
+        // a literal string: a Windows path has backslashes
+        toml::from_str(&format!("id = \"h\"\nname = \"H\"\n[connect]\nkind = \"{kind}\"\nfile = '{}'\n", file.display())).unwrap()
     }
 
     #[test]
