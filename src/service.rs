@@ -114,14 +114,49 @@ pub fn load() -> Result<(), String> {
     Err("Starting at login is not set up for this system yet.".into())
 }
 
+/// From `launchctl print`: whether the job's process is running. The job's own state is the first
+/// `state =` line; its sockets and endpoints have theirs further down.
+pub fn job_running(print: &str) -> bool {
+    print.lines().map(str::trim).find(|l| l.starts_with("state = ")).is_some_and(|l| l == "state = running")
+}
+
+/// launchd has the agent's process running right now.
+pub fn running() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        launchctl(&["print", &format!("{}/{LABEL}", domain())]).map(|t| job_running(&t)).unwrap_or(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// Wait until the agent's process has ended, for at most `limit`. True when it has.
+pub fn wait_ended(limit: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + limit;
+    while running() {
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    true
+}
+
 /// Start the agent's service again after it was stopped. False when there is no agent.
+///
+/// A service that was told to stop is still there while it ends its engine (seconds, with a large
+/// model), and launchd does nothing when asked to start a job that is running: the service would then
+/// end and stay down. So this waits for the old process first, and replaces one that will not end.
 pub fn kickstart() -> bool {
     #[cfg(target_os = "macos")]
     {
         if !installed() {
             return false;
         }
-        if launchctl(&["kickstart", &format!("{}/{LABEL}", domain())]).is_ok() {
+        let job = format!("{}/{LABEL}", domain());
+        let ended = wait_ended(std::time::Duration::from_secs(45));
+        let asked = if ended { launchctl(&["kickstart", &job]) } else { launchctl(&["kickstart", "-k", &job]) };
+        if asked.is_ok() {
             return true;
         }
         // not loaded in this login session yet (it was installed by hand, or booted out)
@@ -151,6 +186,14 @@ pub fn remove(stop: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_jobs_own_state_is_read_not_its_endpoints() {
+        let stopped = "gui/501/app.kr8.eightgent.service = {\n\tactive count = 0\n\tstate = not running\n\tendpoints = {\n\t\t\"x\" = {\n\t\t\tstate = active\n\t\t}\n\t}\n}";
+        assert!(!job_running(stopped));
+        assert!(job_running(&stopped.replace("state = not running", "state = running")));
+        assert!(!job_running("Could not find service"));
+    }
 
     #[test]
     fn the_agent_restarts_a_crash_but_not_a_stop_and_reads_disks_at_full_speed() {

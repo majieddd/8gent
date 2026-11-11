@@ -116,7 +116,7 @@ async fn start(app: &tauri::AppHandle, client: &reqwest::Client) -> Result<Strin
     }
     // set to start at login: the login agent owns the service, so ask it to start it (unless this
     // window was pointed at another data folder, whose service the login agent does not run)
-    if std::env::var_os("EIGHTGENT_HOME").is_none() && eightgent::service::installed() && eightgent::service::kickstart() {
+    if std::env::var_os("EIGHTGENT_HOME").is_none() && eightgent::service::installed() && tauri::async_runtime::spawn_blocking(eightgent::service::kickstart).await.unwrap_or(false) {
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(250)).await;
             if answering(client).await {
@@ -234,8 +234,10 @@ fn swap_when_this_ends(bundle: &std::path::Path, staged: &std::path::Path, backu
     let own_service = std::env::var_os("EIGHTGENT_HOME").is_none();
     let script = format!(
         r#"while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
+SVC=$(/usr/sbin/lsof -nP -iTCP:{port} -sTCP:LISTEN -t 2>/dev/null | head -1)
 /usr/bin/curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{{}}' http://127.0.0.1:{port}/8gent/v1/shutdown >/dev/null 2>&1
-sleep 2
+# the service ends its engine before it ends; asked to start while it is still there, launchd does nothing
+if [ -n "$SVC" ]; then n=0; while kill -0 "$SVC" 2>/dev/null && [ $n -lt 200 ]; do sleep 0.3; n=$((n+1)); done; kill -0 "$SVC" 2>/dev/null && {{ kill "$SVC" 2>/dev/null; sleep 2; }}; else sleep 2; fi
 rm -rf {backup}; mkdir -p {backup}
 /usr/bin/ditto {bundle} {backup}/8gent.app || exit 1
 rm -rf {bundle} && /usr/bin/ditto {staged} {bundle} || {{ /usr/bin/ditto {backup}/8gent.app {bundle}; }}
@@ -250,7 +252,7 @@ rm -rf {stage}
         bundle = q(bundle),
         staged = q(staged),
         stage = q(staged.parent().unwrap_or(staged)),
-        kick = if own_service { format!("[ -f \"$HOME/Library/LaunchAgents/{label}.plist\" ] && /bin/launchctl kickstart \"gui/$(id -u)/{label}\" >/dev/null 2>&1", label = eightgent::service::LABEL) } else { "true".to_string() },
+        kick = if own_service { format!("[ -f \"$HOME/Library/LaunchAgents/{label}.plist\" ] && for i in 1 2 3 4 5; do /bin/launchctl kickstart \"gui/$(id -u)/{label}\" >/dev/null 2>&1; sleep 2; /usr/bin/curl -s -m 2 http://127.0.0.1:{port}/health >/dev/null 2>&1 && break; done", label = eightgent::service::LABEL, port = port()) } else { "true".to_string() },
         open = if reopen { format!("/usr/bin/open {}", q(bundle)) } else { "true".to_string() },
     );
     let mut helper = std::process::Command::new("/bin/bash");

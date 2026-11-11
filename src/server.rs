@@ -1254,8 +1254,8 @@ async fn login_item(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>,
     if handing_over {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            // the agent's service takes the port once this one has let go of it
-            let _ = std::process::Command::new("/bin/sh").args(["-c", "sleep 3; /bin/launchctl bootstrap gui/$(id -u) \"$0\"", &crate::service::plist_path().to_string_lossy()]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+            // the agent's service takes over once this one has ended (it ends its engine first)
+            let _ = std::process::Command::new("/bin/sh").args(["-c", "n=0; while kill -0 \"$1\" 2>/dev/null && [ $n -lt 300 ]; do sleep 0.2; n=$((n+1)); done; /bin/launchctl bootstrap gui/$(id -u) \"$0\"", &crate::service::plist_path().to_string_lossy(), &std::process::id().to_string()]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
             app.quit.notify_waiters();
         });
     }

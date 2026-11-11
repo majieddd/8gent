@@ -21,7 +21,7 @@ const HELP: &str = "8gent: one local endpoint in front of any model loader
   8gent rescan                        look again for loaders and models
   8gent updates [check]               newer engines that are available
   8gent update <loader>               install a loader's newest engine
-  8gent service install | uninstall | status
+  8gent service install | uninstall | restart | status
                                       start the service at login (and now), or stop doing so
 
   EIGHTGENT_HOME    the folder for config, logs and state (default: the per-user data folder)
@@ -121,12 +121,32 @@ async fn service(args: &[String]) -> Result<(), String> {
             println!("8gent no longer starts at login, and its service is stopped");
             Ok(())
         }
+        Some("restart") => {
+            if !service::installed() {
+                return Err("the service is not set to start at login (8gent service install), so there is nothing to restart it; stop it and run 8gent serve".into());
+            }
+            if up().await {
+                let _ = http.post(format!("http://127.0.0.1:{port}/8gent/v1/shutdown")).header("content-type", "application/json").body("{}").send().await;
+            }
+            // waits for the old one to end its engine and itself, then starts the new one
+            if !tokio::task::spawn_blocking(service::kickstart).await.unwrap_or(false) {
+                return Err("macOS did not start the service again".into());
+            }
+            for _ in 0..120 {
+                if up().await {
+                    println!("8gent was restarted");
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(format!("the service was started but is not answering; see {}", paths.logs().join("service.log").display()))
+        }
         Some("status") => {
             println!("starts at login: {}", if service::installed() { "yes" } else { "no" });
             println!("running: {}", if up().await { "yes" } else { "no" });
             Ok(())
         }
-        _ => Err("usage: 8gent service install | uninstall | status".into()),
+        _ => Err("usage: 8gent service install | uninstall | restart | status".into()),
     }
 }
 
