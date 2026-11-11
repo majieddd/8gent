@@ -1,6 +1,6 @@
 [package]
 name = "eightgent-app"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "The 8gent window: a client of the 8gent service"
 license = "MIT"
