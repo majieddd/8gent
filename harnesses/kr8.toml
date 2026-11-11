@@ -1,0 +1,12 @@
+# kr8's own agent. kr8 decides where its agents think; 8gent does not write into kr8's settings.
+id = "kr8"
+name = "kr8"
+summary = "kr8's built-in agent."
+homepage = "https://kr8.app"
+
+[detect]
+programs = ["/Applications/kr8.app/Contents/MacOS/kr8", "~/Applications/kr8.app/Contents/MacOS/kr8"]
+
+[connect]
+kind = "own"
+note = "Set this in kr8: give the agent the local endpoint provider and this address as KR8_LOCAL_BASE_URL. A kr8 that finds 8gent by itself is in review."

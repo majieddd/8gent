@@ -27,7 +27,8 @@ bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: a settings file 8gent edits keeps its keys where its owner put them
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util", "net", "signal"] }
 toml = "0.8"

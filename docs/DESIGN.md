@@ -202,6 +202,8 @@ sending headers before the engine has answered at all; shared sampling defaults.
 | `POST /login-item` | `{enabled}`: start at login or not (macOS: a launchd agent of the user) |
 | `GET /updates`, `POST /updates/check` | newer engines per loader: current, available, held (with the reason), or updated by its own app |
 | `POST /loaders/{id}/update` | install a loader's newest engine; `/updates` shows it running and how it ended |
+| `GET /harnesses` | the agent harnesses on this computer: installed, version, and how each stands with this endpoint |
+| `POST /harnesses/{id}/connect`, `/disconnect` | write 8gent's own entry into the harness's settings, or take it out; says which file changed and where the copy is |
 
 `/models` gives, for every model and loader pair, what a client needs to price any context window
 itself (`base_bytes + kv_bytes_per_token x window x sessions`) and the speed measured so far.
@@ -265,6 +267,7 @@ Home), because two loaded models share one computer's memory.
 
 **Built.** `8gent serve` runs the service; `status`, `loaders`, `models`, `use <model> [--loader]
 [--context 64K] [--thinking on|off]`, `start`, `stop`, `logs` and `rescan` ask a running one.
+`harnesses`, `connect <harness>` and `disconnect <harness>` are the harness layer's first level.
 
 ## First run, and taking over from the Home apps
 
@@ -375,25 +378,55 @@ behind it with no new transport. What changes in kr8, each in a new kr8 file as 
 
 kr8's plan for a small always-on model next to the main one is the "second slot" above.
 
-## Agent harnesses (planned)
+## Agent harnesses
 
 The same pattern one level up. A harness (Hermes, kr8's agent, opencode, Claude Code) is described
-by a file, like a loader, and 8gent works with it at three levels:
+by a file, like a loader (`harnesses/*.toml`, and more in `<data>/harnesses`), and 8gent works with
+it at three levels:
 
-1. **Configure.** 8gent points the harness at its endpoint (writing the harness's own config, with a
-   backup) and shows which harnesses are connected.
-2. **Run.** 8gent starts and stops the harness and shows its sessions and logs.
-3. **Serve.** 8gent offers a whole agent as an endpoint, so kr8 or another app calls "the agent"
-   the way it calls a model.
+1. **Configure. Built.** 8gent points the harness at its endpoint and shows which harnesses are
+   connected.
+2. **Run. Planned.** 8gent starts and stops the harness and shows its sessions and logs.
+3. **Serve. Planned.** 8gent offers a whole agent as an endpoint, so kr8 or another app calls "the
+   agent" the way it calls a model.
+
+### Configure
+
+What cannot be a description is how a harness's settings file is written, so each kind of
+connection is code (`src/harness.rs`): pure functions over the file's text, and a thin layer that
+reads the file, keeps a copy and writes the result in one step. The rules:
+
+- only 8gent's own entry (`8gent`) is added, changed or removed; the harness's default model is
+  never touched, and entries the person made that point here are shown but left alone
+- the file as it was is copied to `<data>/backups/harnesses/<id>/` first, and the answer says where
+- a file that is not in the shape the code understands is not changed at all: Hermes's YAML is
+  edited as text, in the block style Hermes writes (a one-line mapping, tabs, a list or uneven
+  indentation are refused); opencode's file must be plain JSON (comments are refused)
+- disconnecting is refused while the harness's default model is 8gent's
+- "pointed here" means a loopback address on any port this 8gent answers on, so the Home apps'
+  old ports count
+
+| Harness | How it is connected | Tried |
+|---|---|---|
+| Hermes | a `providers:` entry in `~/.hermes/config.yaml` (`hermes chat --provider 8gent -m 8gent`) | the real file is read correctly (connected through three entries); connect and disconnect on a copy of it changed exactly the seven lines of the entry; a Hermes run through that entry worked earlier |
+| opencode | a `provider` entry using `@ai-sdk/openai-compatible`, with the selected model's window as its limit (`opencode run -m 8gent/8gent`) | opencode 1.18.30 listed `8gent/8gent` and answered through it (an 11,237-token prompt); connect and disconnect on a copy round-trip exactly |
+| Claude Code | nothing yet: it speaks Anthropic's API, which 8gent does not offer | listed with that reason |
+| kr8 | from kr8's side (its local endpoint provider); a kr8 that finds 8gent itself is in review | listed with that note |
+
+The window written for opencode is the one selected at that moment; after changing it in 8gent,
+connect again. Running opencode adds a `$schema` line to its own settings by itself.
+
+### Run and serve (planned)
 
 The Chat screen is the first client of level 2: a conversation in it runs through the harness you
-choose, with its tool calls and previews shown. Before the harness layer exists, Chat talks to the
-loaded model directly.
+choose, with its tool calls and previews shown. Until then Chat talks to the loaded model directly.
 
-kr8 already drives its harnesses through the Agent Client Protocol (its `buzz-acp` bridge, with
-`hermes-acp` and Claude Code among the presets), so that protocol is the first candidate for levels
-2 and 3. Which protocol each harness really offers is to be checked when this work starts; nothing
-of this section is built.
+kr8 drives its harnesses through the Agent Client Protocol (its `buzz-acp` bridge), and each harness
+here has a way to start as such an agent: `hermes-acp`, `opencode acp`, and kr8's own `buzz-agent`,
+with which one turn through 8gent was run by hand (`initialize`, `session/new`, `session/prompt`).
+So that protocol is the plan for levels 2 and 3: 8gent starts the harness, forwards the
+conversation, and shows or answers what the agent asks for (permissions, files). Nothing of these
+two levels is built.
 
 ## Next steps
 
@@ -414,9 +447,15 @@ In the order agreed:
    install themselves.
 7. ~~kr8: detection and the real context window, on a branch of kr8 with a draft pull request.~~
    Done as a draft (see kr8); capabilities and the settings card are still to do.
-8. The harness layer, and with it Chat's agent abilities.
+8. The harness layer: ~~configure~~ done for Hermes and opencode; running a harness and serving one,
+   and with them Chat's agent abilities, are next.
 
 ## Open
+
+- **A port can be shadowed.** When 8gent is shared on the network it listens on every address, and
+  another program can still bind the same port on `127.0.0.1` alone and take its local callers. 8gent
+  now asks whether something answers on a port before taking it (so a second 8gent refuses), but a
+  program that does not ask can still do this to 8gent.
 
 - **apollo.** The project to match for responsiveness could not be found on this Mac or on GitHub
   (an earlier project's notes say the same). Its location is needed before borrowing from it.

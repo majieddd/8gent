@@ -1,0 +1,18 @@
+# Hermes Agent (Nous Research). Its providers live in one YAML file; 8gent adds itself as a provider
+# there and never changes which model Hermes uses by default.
+id = "hermes"
+name = "Hermes"
+summary = "An agent for the terminal and for messaging apps, with tools, skills and scheduled jobs."
+homepage = "https://github.com/NousResearch/hermes-agent"
+
+[detect]
+programs = ["hermes", "~/.local/bin/hermes"]
+version_args = ["--version"]
+
+[connect]
+kind = "hermes-yaml"
+file = "~/.hermes/config.yaml"
+use = "hermes chat --provider 8gent -m 8gent"
+
+[run]
+acp = ["hermes-acp"]

@@ -1,10 +1,11 @@
-import { Activity, Boxes, Check, Copy, Cpu, Home as HomeIcon, List, MessageSquare, ScrollText, SlidersHorizontal } from "lucide-react";
+import { Activity, Bot, Boxes, Check, Copy, Cpu, Home as HomeIcon, List, MessageSquare, ScrollText, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button, cx, Mark8, State } from "./components/ui";
 import { api, inTauri, Status } from "./lib/api";
 import { Service, useService } from "./lib/useService";
 import { Chat } from "./pages/Chat";
 import { Home } from "./pages/Home";
+import { Harnesses } from "./pages/Harnesses";
 import { Loaders } from "./pages/Loaders";
 import { Logs } from "./pages/Logs";
 import { Models } from "./pages/Models";
@@ -12,7 +13,7 @@ import { Monitor } from "./pages/Monitor";
 import { Requests } from "./pages/Requests";
 import { Settings } from "./pages/Settings";
 
-export type Tab = "home" | "chat" | "models" | "loaders" | "monitor" | "requests" | "logs" | "settings";
+export type Tab = "home" | "chat" | "models" | "loaders" | "harnesses" | "monitor" | "requests" | "logs" | "settings";
 export type Theme = "system" | "light" | "dark";
 
 const TABS: { id: Tab; label: string; icon: typeof HomeIcon }[] = [
@@ -20,6 +21,7 @@ const TABS: { id: Tab; label: string; icon: typeof HomeIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "models", label: "Models", icon: Boxes },
   { id: "loaders", label: "Loaders", icon: Cpu },
+  { id: "harnesses", label: "Harnesses", icon: Bot },
   { id: "monitor", label: "Monitor", icon: Activity },
   { id: "requests", label: "Requests", icon: List },
   { id: "logs", label: "Logs", icon: ScrollText },
@@ -169,6 +171,7 @@ export function App() {
             {tab === "home" && <Home svc={svc} status={status} modelName={modelName} loaderName={loaderName} openModels={openModels} openRequests={() => setTab("requests")} />}
             {tab === "models" && <Models svc={svc} status={status} picked={picked} setPicked={setPicked} />}
             {tab === "loaders" && <Loaders svc={svc} status={status} />}
+            {tab === "harnesses" && <Harnesses />}
             {tab === "monitor" && <Monitor status={status} modelName={modelName} loaderName={loaderName} />}
             {tab === "requests" && <Requests modelName={modelName} loaderName={loaderName} />}
             {tab === "logs" && <Logs svc={svc} status={status} />}

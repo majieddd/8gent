@@ -54,6 +54,11 @@ is checked against the SHA-256 GitHub publishes, the version you have is kept as
   and model, so you can see which loader runs a model fastest on your computer.
 - **Adds nothing to the time:** a request through 8gent takes as long as one sent straight to the
   engine.
+- **Points your agent harnesses at itself.** `8gent harnesses` shows which of Hermes, opencode,
+  Claude Code and kr8 are on this computer and whether each uses 8gent; `8gent connect opencode`
+  adds 8gent to that harness's settings. It adds only its own entry, keeps a copy of the file
+  first, never changes the harness's default model, and refuses a file it cannot read safely.
+  (Claude Code speaks Anthropic's API, which 8gent does not offer yet; kr8 is set from kr8.)
 
 ## Try it
 

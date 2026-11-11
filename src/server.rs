@@ -961,6 +961,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/8gent/v1/updates", get(updates))
         .route("/8gent/v1/updates/check", post(updates_check))
         .route("/8gent/v1/loaders/{id}/update", post(loader_update))
+        .route("/8gent/v1/harnesses", get(harnesses))
+        .route("/8gent/v1/harnesses/{id}/connect", post(harness_connect))
+        .route("/8gent/v1/harnesses/{id}/disconnect", post(harness_disconnect))
         .fallback(forward)
         .layer(DefaultBodyLimit::disable())
         .with_state(app)
@@ -1262,6 +1265,64 @@ async fn login_item(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>,
     Ok(Json(json!({"ok": true, "login_item": true, "restarting": handing_over})))
 }
 
+/// What a harness is pointed at when it is pointed at this 8gent.
+fn harness_endpoint(app: &App) -> crate::harness::Endpoint {
+    let cfg = app.config();
+    let mut ports = vec![cfg.port];
+    ports.extend(cfg.also_listen.iter().copied());
+    crate::harness::Endpoint {
+        port: cfg.port,
+        ports,
+        served_name: cfg.served_name.clone(),
+        context: (!cfg.selection.model.is_empty() && cfg.selection.context > 0).then_some(cfg.selection.context),
+    }
+}
+
+/// The agent harnesses on this computer and how each stands with this endpoint.
+async fn harnesses(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    let fail = |e: String| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None);
+    let ep = harness_endpoint(&app);
+    let paths = app.paths.clone();
+    // asking a harness for its version starts it, so this is kept off the request threads
+    let list = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
+        let ep = ep;
+        Ok(crate::harness::load_all(&paths)?.iter().map(|h| crate::harness::describe(h, &ep, &paths)).collect())
+    })
+    .await
+    .map_err(|e| fail(e.to_string()))?
+    .map_err(fail)?;
+    Ok(Json(json!({"endpoint": harness_endpoint(&app).base_url(), "harnesses": list})))
+}
+
+async fn harness_change(app: Arc<App>, id: String, on: bool) -> Result<Json<Value>, ApiErr> {
+    let ep = harness_endpoint(&app);
+    let paths = app.paths.clone();
+    let done = tokio::task::spawn_blocking(move || -> Result<Value, ApiErr> {
+        let all = crate::harness::load_all(&paths).map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e, "server_error", None))?;
+        let h = all.iter().find(|h| h.id == id).ok_or_else(|| ApiErr::new(StatusCode::NOT_FOUND, format!("There is no harness called \"{id}\"."), "invalid_request_error", Some("harness_not_found")))?;
+        let written = if on { crate::harness::connect(h, &ep, &paths) } else { crate::harness::disconnect(h, &ep, &paths) }
+            .map_err(|e| ApiErr::new(StatusCode::CONFLICT, e, "invalid_request_error", Some("harness_not_changed")))?;
+        Ok(json!({"ok": true, "written": written, "harness": crate::harness::describe(h, &ep, &paths)}))
+    })
+    .await
+    .map_err(|e| ApiErr::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), "server_error", None))??;
+    Ok(Json(done))
+}
+
+/// Point a harness at this endpoint: 8gent's own entry is written into its settings, a copy of the
+/// file as it was is kept, and the harness's default model is left alone.
+async fn harness_connect(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    harness_change(app, id, true).await
+}
+
+/// Take 8gent's entry out of a harness's settings again.
+async fn harness_disconnect(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<Value>, ApiErr> {
+    authorize(&app, &remote, &headers, true)?;
+    harness_change(app, id, false).await
+}
+
 /// Everything else under /v1 goes to the engine; other paths do not exist.
 async fn forward(State(app): S, ConnectInfo(remote): ConnectInfo<SocketAddr>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(e) = authorize(&app, &remote, &headers, false) {
@@ -1338,6 +1399,24 @@ pub async fn serve(app: Arc<App>, listener: tokio::net::TcpListener, shutdown: i
 mod tests {
     use super::allowed;
 
+    #[tokio::test]
+    async fn a_port_something_answers_on_is_taken() {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(super::port_taken(port).await, "listening on every address counts for 127.0.0.1");
+        drop(listener);
+        // the system lets go of the port a moment after the listener is dropped
+        let mut free = false;
+        for _ in 0..50 {
+            if !super::port_taken(port).await {
+                free = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(free, "a port nothing listens on is not taken");
+    }
+
     #[test]
     fn other_computers_need_the_key() {
         // this computer: always
@@ -1350,11 +1429,24 @@ mod tests {
     }
 }
 
+/// Whether something on this computer already answers on `port`.
+///
+/// Asked before listening, because being able to bind does not mean the port is free: when one
+/// program listens on every address (`0.0.0.0`, which 8gent does when it is shared on the network)
+/// another may still bind the same port on `127.0.0.1` alone, and from then on gets every local
+/// caller. A second 8gent did exactly that to the first one's port.
+pub async fn port_taken(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    matches!(tokio::time::timeout(Duration::from_millis(300), tokio::net::TcpStream::connect(addr)).await, Ok(Ok(_)))
+}
+
 /// Answer on one more port (the address of a Home app 8gent replaced). If something else holds the
 /// port, try again every 10 s: the Home app may still be shutting down, or be opened again later.
 pub async fn serve_alias(app: Arc<App>, addr: SocketAddr) {
     loop {
-        if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+        if port_taken(addr.port()).await {
+            // see `port_taken`: binding would succeed and take the port's local callers away
+        } else if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
             eprintln!("8gent: also answering on http://{addr}/v1");
             app.aliases.write().unwrap().push(addr.port());
             let _ = axum::serve(listener, router(app.clone()).into_make_service_with_connect_info::<SocketAddr>()).await;

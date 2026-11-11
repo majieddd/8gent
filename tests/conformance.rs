@@ -496,3 +496,63 @@ async fn stop_and_start_and_the_lists() {
     let logs = s.get("/8gent/v1/logs?loader=mocka&lines=20").await.1;
     assert!(logs["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("mock-engine: mocka serving alpha")), "{logs}");
 }
+
+#[tokio::test]
+async fn a_harness_is_pointed_here_and_taken_off_again_with_a_copy_kept() {
+    let s = service_with("[selection]\nloader = \"mocka\"\nmodel = \"alpha\"\ncontext = 8192\n").await;
+    // a harness described by a file in the data folder, with its settings in the test's own folder
+    let settings = s.home.join("their-settings").join("opencode.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "{\n  \"theme\": \"mine\",\n  \"mcp\": {}\n}\n").unwrap();
+    std::fs::create_dir_all(s.home.join("harnesses")).unwrap();
+    std::fs::write(
+        s.home.join("harnesses/scratch.toml"),
+        format!("id = \"scratch\"\nname = \"Scratch\"\n[detect]\nprograms = [\"{}\"]\n[connect]\nkind = \"opencode-json\"\nfile = \"{}\"\nuse = \"scratch run\"\n", std::env::current_exe().unwrap().display(), settings.display()),
+    )
+    .unwrap();
+    let find = |v: &Value, id: &str| v["harnesses"].as_array().unwrap().iter().find(|h| h["id"] == id).cloned().unwrap_or(Value::Null);
+
+    let (code, list) = s.get("/8gent/v1/harnesses").await;
+    assert_eq!(code, 200, "{list}");
+    assert_eq!(list["endpoint"], "http://127.0.0.1:8436/v1");
+    for id in ["hermes", "opencode", "claude-code", "kr8"] {
+        assert_eq!(find(&list, id)["id"], id, "the built-in harnesses are listed");
+    }
+    let scratch = find(&list, "scratch");
+    assert_eq!((scratch["installed"].as_bool(), scratch["link"]["state"].as_str(), scratch["can_connect"].as_bool()), (Some(true), Some("not_connected"), Some(true)), "{scratch}");
+
+    let (code, done) = s.post("/8gent/v1/harnesses/scratch/connect", json!({})).await;
+    assert_eq!(code, 200, "{done}");
+    assert_eq!(done["written"]["changed"], true);
+    assert_eq!(done["harness"]["link"], json!({"state": "connected", "entries": ["8gent"]}));
+    let copy = done["written"]["backup"].as_str().expect("where the copy is");
+    assert_eq!(std::fs::read_to_string(copy).unwrap(), "{\n  \"theme\": \"mine\",\n  \"mcp\": {}\n}\n");
+    let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(now["theme"], "mine");
+    assert_eq!(now["provider"]["8gent"]["options"]["baseURL"], "http://127.0.0.1:8436/v1");
+    // the window of the model that is selected goes with it
+    assert_eq!(now["provider"]["8gent"]["models"]["8gent"]["limit"], json!({"context": 8192, "output": 2048}));
+
+    // again: nothing to do, nothing written, no second copy
+    let (code, again) = s.post("/8gent/v1/harnesses/scratch/connect", json!({})).await;
+    assert_eq!((code, again["written"]["changed"].as_bool(), again["written"]["backup"].is_null()), (200, Some(false), true), "{again}");
+
+    let (code, off) = s.post("/8gent/v1/harnesses/scratch/disconnect", json!({})).await;
+    assert_eq!((code, off["written"]["changed"].as_bool()), (200, Some(true)), "{off}");
+    assert_eq!(off["harness"]["link"]["state"], "not_connected");
+    let back: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(back, json!({"theme": "mine", "mcp": {}}));
+
+    // settings 8gent cannot read are refused and left alone
+    std::fs::write(&settings, "{ // mine\n}\n").unwrap();
+    let (code, refused) = s.post("/8gent/v1/harnesses/scratch/connect", json!({})).await;
+    assert_eq!(code, 409, "{refused}");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("Nothing was changed"), "{refused}");
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{ // mine\n}\n");
+    assert_eq!(find(&s.get("/8gent/v1/harnesses").await.1, "scratch")["link"]["state"], "unreadable");
+
+    // a harness 8gent does not write for, and one that does not exist
+    assert_eq!(s.post("/8gent/v1/harnesses/claude-code/connect", json!({})).await.0, 409);
+    let (code, missing) = s.post("/8gent/v1/harnesses/nothing/connect", json!({})).await;
+    assert_eq!((code, missing["error"]["code"].as_str()), (404, Some("harness_not_found")), "{missing}");
+}

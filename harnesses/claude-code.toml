@@ -1,0 +1,13 @@
+# Claude Code speaks Anthropic's API. 8gent's endpoint is OpenAI's, so there is nothing to connect yet.
+id = "claude-code"
+name = "Claude Code"
+summary = "Anthropic's coding agent for the terminal."
+homepage = "https://claude.com/claude-code"
+
+[detect]
+programs = ["claude", "~/.local/bin/claude"]
+version_args = ["--version"]
+
+[connect]
+kind = "none"
+note = "Claude Code speaks Anthropic's API, which 8gent does not offer yet."

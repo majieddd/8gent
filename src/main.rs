@@ -23,6 +23,9 @@ const HELP: &str = "8gent: one local endpoint in front of any model loader
   8gent update <loader>               install a loader's newest engine
   8gent service install | uninstall | restart | status
                                       start the service at login (and now), or stop doing so
+  8gent harnesses                     the agent harnesses here, and which are pointed at 8gent
+  8gent connect <harness>             point a harness at 8gent (its settings are copied first)
+  8gent disconnect <harness>          take 8gent out of a harness's settings again
 
   EIGHTGENT_HOME    the folder for config, logs and state (default: the per-user data folder)
 ";
@@ -68,7 +71,9 @@ async fn serve(args: &[String]) -> Result<(), String> {
     // a service that is handing over to this one may hold the port for a few more seconds
     let mut tries = 0;
     let listener = loop {
-        match tokio::net::TcpListener::bind(addr).await {
+        // asked first: binding can succeed on a port another 8gent is already answering on
+        let bound = if server::port_taken(port).await { Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "something already answers on this port")) } else { tokio::net::TcpListener::bind(addr).await };
+        match bound {
             Ok(l) => break l,
             Err(e) if tries >= 40 => return Err(format!("cannot listen on {addr}: {e} (is 8gent already running?)")),
             Err(_) => {
@@ -207,6 +212,32 @@ async fn client(command: &str, args: &[String]) -> Result<(), String> {
                 println!("small model: {} on {}, loaded in {} s", s(&v["small"]["model"]), s(&v["small"]["loader"]), v["load_seconds"]);
             } else {
                 println!("no small model");
+            }
+        }
+        "harnesses" => print_harnesses(&get("/harnesses").await?),
+        cmd @ ("connect" | "disconnect") => {
+            let id = args.first().ok_or(format!("usage: 8gent {cmd} <harness>   (8gent harnesses lists them)"))?;
+            let v = post(&format!("/harnesses/{id}/{cmd}"), json!({})).await?;
+            let name = s(&v["harness"]["name"]);
+            let file = s(&v["written"]["file"]);
+            match (cmd, v["written"]["changed"] == true) {
+                ("connect", true) => {
+                    println!("{name} can now use 8gent ({file})");
+                    if let Some(copy) = v["written"]["backup"].as_str() {
+                        println!("the file as it was: {copy}");
+                    }
+                    if let Some(how) = v["harness"]["use"].as_str().filter(|h| !h.is_empty()) {
+                        println!("try: {how}");
+                    }
+                }
+                ("connect", false) => println!("{name} was already pointed at 8gent; nothing was changed"),
+                (_, true) => {
+                    println!("8gent was taken out of {name}'s settings ({file})");
+                    if let Some(copy) = v["written"]["backup"].as_str() {
+                        println!("the file as it was: {copy}");
+                    }
+                }
+                (_, false) => println!("{name} had no 8gent entry; nothing was changed"),
             }
         }
         "updates" => {
@@ -353,6 +384,19 @@ fn print_updates(v: &Value) {
     }
     if v["updates"].as_array().is_none_or(|a| a.is_empty()) {
         println!("  not checked yet (8gent updates check)");
+    }
+}
+
+fn print_harnesses(v: &Value) {
+    for h in v["harnesses"].as_array().into_iter().flatten() {
+        let installed = if h["installed"] == true { format!("installed{}", h["version"].as_str().map(|x| format!(", {x}")).unwrap_or_default()) } else { "not installed".to_string() };
+        let link = match h["link"]["state"].as_str() {
+            Some("connected") => format!("uses 8gent (as {})", h["link"]["entries"].as_array().map(|e| e.iter().map(s).collect::<Vec<_>>().join(", ")).unwrap_or_default()),
+            Some("not_connected") => format!("not pointed at 8gent: 8gent connect {}", s(&h["id"])),
+            Some("unreadable") => format!("settings not read: {}", s(&h["link"]["why"])),
+            _ => s(&h["link"]["why"]).to_string(),
+        };
+        println!("{:<12} {:<12} {installed}; {link}", s(&h["id"]), s(&h["name"]));
     }
 }
 

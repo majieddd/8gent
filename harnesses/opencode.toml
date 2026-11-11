@@ -1,0 +1,17 @@
+# opencode. Providers are entries in its JSON config; 8gent adds one that speaks the OpenAI API to it.
+id = "opencode"
+name = "opencode"
+summary = "A coding agent for the terminal."
+homepage = "https://github.com/sst/opencode"
+
+[detect]
+programs = ["opencode", "/opt/homebrew/bin/opencode", "~/.opencode/bin/opencode"]
+version_args = ["--version"]
+
+[connect]
+kind = "opencode-json"
+file = "~/.config/opencode/opencode.json"
+use = "opencode run -m 8gent/8gent \"...\""
+
+[run]
+acp = ["opencode", "acp"]

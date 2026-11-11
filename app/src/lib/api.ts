@@ -183,7 +183,29 @@ export const appUpdate = {
   install: () => invoke<string>("app_update_install"),
 };
 
+export type HarnessLink =
+  | { state: "connected"; entries: string[] }
+  | { state: "not_connected" }
+  | { state: "unreadable"; why: string }
+  | { state: "not_by_eightgent"; why: string };
+export interface Harness {
+  id: string; name: string; summary: string; homepage: string;
+  installed: boolean; program: string | null; version: string | null;
+  link: HarnessLink;
+  /** 8gent can write this harness's settings (otherwise `link.why` says how it is set). */
+  can_connect: boolean;
+  /** "settings": 8gent writes its settings; "own": it chooses its endpoint itself; "none": it cannot use this endpoint. */
+  connect_kind: "settings" | "own" | "none";
+  settings_file: string | null;
+  /** A command that uses the harness with 8gent, to copy. */
+  use: string;
+  runs_as_agent: boolean;
+}
+export interface HarnessWritten { changed: boolean; file: string; backup: string | null }
+
 export const api = {
+  harnesses: () => call<{ endpoint: string; harnesses: Harness[] }>("GET", "/8gent/v1/harnesses"),
+  connectHarness: (id: string, on: boolean) => call<{ ok: boolean; written: HarnessWritten; harness: Harness }>("POST", `/8gent/v1/harnesses/${id}/${on ? "connect" : "disconnect"}`, {}),
   updates: () => call<{ updates: UpdateState[]; auto_update: boolean }>("GET", "/8gent/v1/updates"),
   checkUpdates: () => call<{ updates: UpdateState[]; auto_update: boolean }>("POST", "/8gent/v1/updates/check", {}),
   updateLoader: (id: string) => call<{ ok: boolean }>("POST", `/8gent/v1/loaders/${id}/update`, {}),

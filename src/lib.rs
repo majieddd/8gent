@@ -6,9 +6,11 @@
 //! - [`server`], [`proxy`]: the OpenAI-compatible endpoint and the control API
 //! - [`normalize`]: making every loader's API behave the same for clients
 //! - [`stats`]: requests answered, and speed per loader and model
+//! - [`harness`]: the agent harnesses on this computer, and pointing them at this endpoint
 
 pub mod config;
 pub mod engine;
+pub mod harness;
 pub mod host;
 pub mod import;
 pub mod library;
