@@ -279,6 +279,12 @@ has the same switch. On macOS this is a launchd agent of the user, marked intera
 launchd does not throttle its disk reads (an engine started by a background job took minutes to load
 a model). It restarts the service after a crash, not after "Stop the service".
 
+Restarting has one trap, found the hard way: a service that was told to stop is still there while it
+ends its engine, and launchd does nothing when asked to start a job that is running, so the service
+then ended and stayed down. Everything that restarts the service (`8gent service restart`, the app's
+updater, the app starting the login service, handing over to the login agent) waits for the old
+process to end first.
+
 Moving over by hand: switch the Home apps' endpoints and daily updates off (`uzuctl login off`,
 `uzuctl gateway stop`, `uzuctl engine stop`, `uzuctl autoupdate off`, and the same with `tfctl`),
 then `8gent service install`.
@@ -356,11 +362,16 @@ OpenAI-compatible address (default: Ollama's port; `KR8_LOCAL_BASE_URL` override
 behind it with no new transport. What changes in kr8, each in a new kr8 file as its rules ask:
 
 1. Detect 8gent (port 8436) in the capability catalogue and prefer it when present; later make it
-   the default address and ship the 8gent binary with kr8.
-2. Read `context_length` from `/v1/models` and pass it to the agent, replacing the fixed 32,768 and
-   the Ollama-only derived tags. (8gent is not Ollama, so kr8's Ollama cap leaves it alone.)
-3. Read `capabilities` from `/v1/models` instead of asking Ollama's `/api/show`.
-4. A small settings card: loader, model, state, "Open 8gent".
+   the default address and ship the 8gent binary with kr8. **On kr8's branch
+   `kr8-8gent-endpoint` (draft pull request):** a catalogue entry, tried before Ollama by first-run
+   setup, offered on macOS only until someone has run the Windows and Linux builds.
+2. Read `context_length` from `/v1/models` and fit the agent's budget to it. **On the same branch:**
+   kr8's agent asks the loopback endpoint once at startup (`kr8_endpoint_window.rs`). Tried for
+   real: the agent started against 8gent with a 96,000-token budget and answered through uzu.
+   Without it the agent still recovers, because 8gent's overflow error is the standard one kr8
+   already hands off on, but only after a refused request.
+3. Read `capabilities` from `/v1/models` instead of asking Ollama's `/api/show`. Not started.
+4. A small settings card: loader, model, state, "Open 8gent". Not started.
 
 kr8's plan for a small always-on model next to the main one is the "second slot" above.
 
@@ -401,7 +412,8 @@ In the order agreed:
 6. Windows and Linux: ~~builds~~ done by GitHub; still to do: a person trying them, a job object on
    Windows so an engine never outlives the service, starting at login there, and updates that
    install themselves.
-7. kr8: detection and the real context window, on a branch of kr8 with a draft pull request.
+7. ~~kr8: detection and the real context window, on a branch of kr8 with a draft pull request.~~
+   Done as a draft (see kr8); capabilities and the settings card are still to do.
 8. The harness layer, and with it Chat's agent abilities.
 
 ## Open

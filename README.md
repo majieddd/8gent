@@ -113,6 +113,7 @@ up (Settings has "Stop the service"). To work on the screens in a browser: `8gen
 `npm run dev` in `app/` and open http://localhost:1420.
 
 `8gent service install` (or Settings > Start at login) makes the service start when you log in.
+`8gent service restart` stops it and starts it again (it waits for the engine to be ended first).
 
 **Coming from uzu Home or TensorFold Home:** on its first run 8gent takes over the Home app's
 selection, context window, network sharing and memory mode, and answers on the Home app's port too,

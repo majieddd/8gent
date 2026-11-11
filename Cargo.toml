@@ -1,6 +1,6 @@
 [package]
 name = "eightgent"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "8gent: one local endpoint for any model loader (uzu, TensorFold, llama.cpp, Ollama, LM Studio, Strata)"
 license = "MIT"
